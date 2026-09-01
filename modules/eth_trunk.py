@@ -1,7 +1,5 @@
 """基础 Eth-Trunk 链路聚合配置生成（对应文档 2.4）。"""
-from .base import render_vlan_batch
-
-TYPE_MAP = {"GE": "GigabitEthernet", "ETH": "Ethernet"}
+from .base import port_name, render_vlan_batch
 
 
 def collect_vlans(params):
@@ -20,8 +18,7 @@ def generate(params):
         f" port trunk allow-pass vlan {allow}",
     ]
     for member in members:
-        port_type = TYPE_MAP.get(member.get("type"), member.get("type", "GigabitEthernet"))
-        lines += [f"interface {port_type}0/0/{member['num']}", f" eth-trunk {trunk_id}"]
+        lines += [f"interface {port_name(member.get('type'), member['num'])}", f" eth-trunk {trunk_id}"]
     return "\n".join(lines)
 
 

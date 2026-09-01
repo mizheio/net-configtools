@@ -15,7 +15,7 @@ from tkinter import ttk, messagebox, filedialog, simpledialog
 
 import variables as varlib
 from modules import if_vlan, vlanif, dhcp, vrrp, mstp, eth_trunk, ospf, acl
-from modules.base import collect_vlans, render_vlan_batch
+from modules.base import collect_vlans, port_name, render_vlan_batch
 
 
 # ============================================================ IP / VLAN 库面板
@@ -87,7 +87,10 @@ class IfVlanPage:
         bar.pack(fill=tk.X, pady=(0, 4))
         ttk.Label(bar, text="端口类型:").pack(side=tk.LEFT)
         self.type_var = tk.StringVar(value="GE")
-        ttk.Combobox(bar, textvariable=self.type_var, values=("GE", "ETH"), width=5, state="readonly").pack(side=tk.LEFT, padx=(2, 8))
+        ttk.Combobox(bar, textvariable=self.type_var, values=("GE", "ETH"), width=5, state="readonly").pack(side=tk.LEFT, padx=(2, 6))
+        ttk.Label(bar, text="槽位:").pack(side=tk.LEFT)
+        self.slot_var = tk.StringVar(value="0/0")
+        ttk.Entry(bar, textvariable=self.slot_var, width=5).pack(side=tk.LEFT, padx=(2, 8))
         ttk.Label(bar, text="起始口:").pack(side=tk.LEFT)
         self.start_var = tk.IntVar(value=1)
         ttk.Spinbox(bar, from_=1, to=48, textvariable=self.start_var, width=4).pack(side=tk.LEFT, padx=2)
@@ -101,10 +104,10 @@ class IfVlanPage:
 
         head = ttk.Frame(self.frame)
         head.pack(fill=tk.X)
-        for col, text, w in ((0, "勾选", 5), (1, "接口", 17), (2, "模式", 8),
-                             (3, "VLAN", 8), (4, "PVID", 8), (5, "allow-pass", 22)):
+        for col, text, w in ((0, "勾选", 5), (1, "类型", 6), (2, "编号", 10), (3, "模式", 8),
+                             (4, "VLAN", 8), (5, "PVID", 8), (6, "allow-pass", 22)):
             ttk.Label(head, text=text, width=w).grid(row=0, column=col, padx=2, sticky=tk.W)
-        head.columnconfigure(5, weight=1)
+        head.columnconfigure(6, weight=1)
 
         wrap = ttk.Frame(self.frame)
         wrap.pack(fill=tk.BOTH, expand=True)
@@ -124,14 +127,19 @@ class IfVlanPage:
         self.canvas.yview_scroll(int(-event.delta / 120), "units")
 
     def build_rows(self):
+        # 重建前快照已填内容，批量调整端口范围/槽位时按行号保留，不再清空
+        saved = [{k: row[k].get() for k in ("check", "type", "num", "mode", "vlan", "pvid", "allow")}
+                 for row in self.rows]
         for w in self.inner.winfo_children():
             w.destroy()
         self.rows = []
         self._vlan_combos = []
         token = self.type_var.get()
+        slot = self.slot_var.get().strip().strip("/")
         for num in range(self.start_var.get(), self.end_var.get() + 1):
             row = {
-                "token": token, "num": num,
+                "type": tk.StringVar(value=token),
+                "num": tk.StringVar(value=f"{slot}/{num}" if slot else str(num)),
                 "check": tk.BooleanVar(value=False),
                 "mode": tk.StringVar(value="access"),
                 "vlan": tk.StringVar(value=""),
@@ -141,18 +149,25 @@ class IfVlanPage:
             row["mode"].trace_add("write", lambda *_, r=row: self._update_row_state(r))
             r = len(self.rows)
             ttk.Checkbutton(self.inner, variable=row["check"]).grid(row=r, column=0, padx=2)
-            ttk.Label(self.inner, text=f"{token}0/0/{num}", width=15).grid(row=r, column=1, padx=2, sticky=tk.W)
-            ttk.Combobox(self.inner, textvariable=row["mode"], values=("access", "trunk"), width=7, state="readonly").grid(row=r, column=2, padx=2)
+            ttk.Combobox(self.inner, textvariable=row["type"], values=("GE", "ETH"),
+                         width=5, state="readonly").grid(row=r, column=1, padx=2)
+            ttk.Entry(self.inner, textvariable=row["num"], width=9).grid(row=r, column=2, padx=2)
+            ttk.Combobox(self.inner, textvariable=row["mode"], values=("access", "trunk"), width=7, state="readonly").grid(row=r, column=3, padx=2)
             vlan_w = ttk.Combobox(self.inner, textvariable=row["vlan"], width=6)
-            vlan_w.grid(row=r, column=3, padx=2)
+            vlan_w.grid(row=r, column=4, padx=2)
             pvid_w = ttk.Combobox(self.inner, textvariable=row["pvid"], width=6)
-            pvid_w.grid(row=r, column=4, padx=2)
+            pvid_w.grid(row=r, column=5, padx=2)
             allow_w = ttk.Combobox(self.inner, textvariable=row["allow"], width=24)
-            allow_w.grid(row=r, column=5, padx=2, sticky=tk.W)
+            allow_w.grid(row=r, column=6, padx=2, sticky=tk.W)
             row["vlan_w"], row["pvid_w"], row["allow_w"] = vlan_w, pvid_w, allow_w
             self._vlan_combos += [vlan_w, pvid_w, allow_w]
             self._update_row_state(row)
             self.rows.append(row)
+        for row, snap in zip(self.rows, saved):
+            for k in ("type", "num", "vlan", "pvid", "allow"):
+                row[k].set(snap[k])
+            row["check"].set(snap["check"])
+            row["mode"].set(snap["mode"])
         self._apply_values()
 
     def _update_row_state(self, row):
@@ -179,7 +194,7 @@ class IfVlanPage:
         for row in self.rows:
             if not row["check"].get():
                 continue
-            port = {"type": row["token"], "num": row["num"], "mode": row["mode"].get()}
+            port = {"type": row["type"].get(), "num": row["num"].get().strip(), "mode": row["mode"].get()}
             if port["mode"] == "access":
                 port["vlan"] = row["vlan"].get().strip()
             else:
@@ -193,7 +208,7 @@ class IfVlanPage:
     def validate(self, params):
         errors = []
         for p in params["ports"]:
-            label = f"{p['type']}0/0/{p['num']}"
+            label = port_name(p["type"], p["num"])
             if p["mode"] == "access":
                 if not str(p.get("vlan", "")).isdigit():
                     errors.append(f"{label}: access 模式必须填数字 VLAN")

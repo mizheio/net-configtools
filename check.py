@@ -54,6 +54,28 @@ interface GigabitEthernet0/0/1
  port link-type trunk
  port trunk allow-pass vlan 10 20""")
 
+# ---- 自定义槽位：千兆板卡号 1/0/x + 百兆口混排（编号含 / 时原样使用）----
+ok &= run("1.4 自定义槽位混合", if_vlan.generate_full({"ports": [
+    {"type": "GE", "num": "1/0/1", "mode": "access", "vlan": "10"},
+    {"type": "ETH", "num": "0/0/2", "mode": "trunk", "allow": "10 20"},
+]}), """\
+vlan batch 10 20
+interface GigabitEthernet1/0/1
+ port link-type access
+ port default vlan 10
+interface Ethernet0/0/2
+ port link-type trunk
+ port trunk allow-pass vlan 10 20""")
+
+# ---- 旧格式兼容：num 为纯数字时自动补默认槽位 0/0/ ----
+ok &= run("1.5 纯数字编号兼容", if_vlan.generate_full({"ports": [
+    {"type": "ETH", "num": 3, "mode": "access", "vlan": "20"},
+]}), """\
+vlan 20
+interface Ethernet0/0/3
+ port link-type access
+ port default vlan 20""")
+
 # ---- 多接口混合（1个access + 2个trunk，vlan汇总去重）----
 ok &= run("多接口混合", if_vlan.generate_full({"ports": [
     {"type": "GE", "num": 1, "mode": "access", "vlan": "10"},

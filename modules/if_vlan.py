@@ -3,22 +3,20 @@
 params 示例:
 {
   "ports": [
-    {"type": "GE", "num": 1, "mode": "access", "vlan": "10"},
-    {"type": "ETH", "num": 1, "mode": "trunk", "pvid": "100", "allow": "110 100"},
+    {"type": "GE", "num": "0/0/1", "mode": "access", "vlan": "10"},
+    {"type": "ETH", "num": "0/0/1", "mode": "trunk", "pvid": "100", "allow": "110 100"},
   ]
 }
+num 也兼容旧格式纯数字（如 1，自动补 0/0/ 槽位），或含板卡号的 "1/0/1"。
 """
-from .base import collect_vlans, render_vlan_batch
-
-TYPE_MAP = {"GE": "GigabitEthernet", "ETH": "Ethernet"}
+from .base import collect_vlans, port_name, render_vlan_batch
 
 
 def generate(params):
     """生成接口配置正文（不含 vlan batch 头部）"""
     blocks = []
     for p in params["ports"]:
-        itype = TYPE_MAP.get(p.get("type"), str(p.get("type")))
-        lines = [f"interface {itype}0/0/{p['num']}"]
+        lines = [f"interface {port_name(p.get('type'), p['num'])}"]
         if p["mode"] == "access":
             lines.append(" port link-type access")
             lines.append(f" port default vlan {p['vlan']}")

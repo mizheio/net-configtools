@@ -1,4 +1,14 @@
-"""公共工具：VLAN 汇总、vlan batch 头部生成"""
+"""公共工具：VLAN 汇总、vlan batch 头部生成、接口名拼接"""
+
+# 接口类型缩写 -> 华为完整接口名前缀
+PORT_TYPE_MAP = {"GE": "GigabitEthernet", "ETH": "Ethernet"}
+
+
+def port_name(type_token, num):
+    """拼接完整接口名。num 含 '/'（如 1/0/1）时原样使用，纯数字时补默认槽位 0/0/。"""
+    itype = PORT_TYPE_MAP.get(type_token, str(type_token))
+    num = str(num).strip()
+    return f"{itype}{num}" if "/" in num else f"{itype}0/0/{num}"
 
 
 def collect_vlans(port_list):
