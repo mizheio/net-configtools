@@ -6,6 +6,7 @@
   "vlan"    VLAN 库可编辑下拉
   (a, b)    固定选项只读下拉
   "port"    端口选择（PortField），values() 返回完整接口名
+  "check"   勾选框，values() 返回 True/False
 """
 import tkinter as tk
 from tkinter import ttk
@@ -40,6 +41,10 @@ class RowsEditor:
                     widget.set(*value)
                 elif value:
                     widget.set("GE", value)
+            elif kind == "check":
+                var = tk.BooleanVar(value=bool(defaults.get(key, False)))
+                row[key] = var
+                widget = ttk.Checkbutton(self.area, variable=var)
             else:
                 var = tk.StringVar(value=defaults.get(key, ""))
                 row[key] = var
@@ -72,6 +77,8 @@ class RowsEditor:
             item = {}
             for key, _, _, kind in self.columns:
                 if kind == "port":
+                    item[key] = row[key].get()
+                elif kind == "check":
                     item[key] = row[key].get()
                 else:
                     item[key] = row[key].get().strip()

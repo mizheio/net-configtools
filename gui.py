@@ -19,10 +19,11 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 
 import variables as varlib
-from modules import vrrp
+from modules import eth_trunk, vrrp
 from modules.base import render_vlan_batch
 from pages import CATEGORY_PAGES
-from pages.switch import VrrpPage
+from pages.switch import EthTrunkPage, VrrpPage
+from widgets import ScrollFrame
 
 
 # ============================================================ IP / VLAN 库面板
@@ -113,15 +114,27 @@ class App:
         self.nb = ttk.Notebook(right)
         self.nb.pack(fill=tk.BOTH, expand=True)
 
-        # 按注册表装配页面；双栖页面（DHCP/OSPF/ACL）在两个类别间共享同一实例
+        # 按注册表装配页面；双栖页面（DHCP/OSPF/ACL）在两个类别间共享同一实例。
+        # 默认每页包一层 ScrollFrame 支持上下滚动；OWN_SCROLL 页（接口VLAN）自带行区滚动
         self._page_by_cls = {}
+        self._page_wrap = {}
         for category, classes in CATEGORY_PAGES.items():
             for cls in classes:
                 if cls not in self._page_by_cls:
-                    page = cls(self.nb, app=self)
+                    if getattr(cls, "OWN_SCROLL", False):
+                        page = cls(self.nb, app=self)
+                        wrap = None
+                    else:
+                        wrap = ScrollFrame(self.nb)
+                        page = cls(wrap.inner, app=self)
+                        page.frame.pack(fill=tk.BOTH, expand=True)
                     self._page_by_cls[cls] = page
+                    self._page_wrap[page] = wrap
         self._rebuild_tabs()
         self._sync_lib()
+
+        # 滚轮统一路由：从指针下的控件向上找最近的滚动画布（含接口VLAN页自带画布）
+        root.bind_all("<MouseWheel>", self._on_wheel)
 
         bottom = ttk.Frame(paned, padding=4)
         paned.add(bottom, weight=2)
@@ -148,15 +161,25 @@ class App:
         return [self._page_by_cls[cls] for cls in CATEGORY_PAGES[self.category_var.get()]]
 
     def _rebuild_tabs(self):
+        print(f"Rebuilding tabs for category: {self.category_var.get()}")
         selected = self.nb.select()
         last_title = self.nb.tab(selected, "text").strip() if selected else None
-        self.nb.forget(*self.nb.tabs())
-        for page in self._current_pages():
-            self.nb.add(page.frame, text=f" {page.TITLE} ")
+        tabs = self.nb.tabs()
+        print(f"Current tabs: {tabs}")
+        if tabs:
+            for tab in tabs[:]:
+                print(f"Forgetting tab: {tab}")
+                self.nb.forget(tab)
+        current_pages = self._current_pages()
+        print(f"Current pages: {[p.TITLE for p in current_pages]}")
+        for page in current_pages:
+            print(f"Adding page: {page.TITLE}")
+            self.nb.add(self._page_wrap.get(page) or page.frame, text=f" {page.TITLE} ")
         if last_title:
             for i in range(self.nb.index("end")):
                 if self.nb.tab(i, "text").strip() == last_title:
                     self.nb.select(i)
+                    print(f"Restoring last selected tab: {last_title}")
                     break
 
     def _sync_lib(self):
@@ -164,6 +187,18 @@ class App:
         lib = self.lib_panel.lib
         for page in self._page_by_cls.values():
             page.set_lib_values(lib["ip"], lib["vlan"])
+
+    def _on_wheel(self, event):
+        """滚轮统一路由：指针下的控件向上找最近的 Canvas，找到就滚动它。
+        输出预览 Text、库面板 Treeview 等自带滚动的控件走各自的原生滚动。"""
+        w = self.root.winfo_containing(event.x_root, event.y_root)
+        if w is None or w.winfo_toplevel() is not self.root:
+            return  # 下拉列表、弹窗等其他 toplevel 不接管
+        while w is not None:
+            if isinstance(w, tk.Canvas):
+                w.yview_scroll(int(-event.delta / 120), "units")
+                return
+            w = w.master
 
     # ---------- 生成流程：collect -> validate -> generate ----------
     def _prepare(self, page):
@@ -201,6 +236,7 @@ class App:
         self.last_params = {"vrrp": params, "target": target}
         self.set_preview(text)
 
+    
     def generate_all(self):
         """按当前设备类别汇总：正文拼接，VLAN 去重后统一放头部 vlan batch"""
         blocks, errors, vlans, all_params = [], [], set(), {}

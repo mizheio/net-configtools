@@ -121,7 +121,51 @@ ip pool pool-vlan10
 interface Vlanif10
  dhcp select global""")
 
-# ---- DHCP 中继/主备已按需求删除，v0.1 只保留全局地址池 ----
+# ---- 文档 2.6 DHCP 中继（网关设备侧）----
+ok &= run("2.6b DHCP中继", dhcp.generate({
+    "mode": "relay", "if_vlan": "10", "relay_ip": "192.168.200.254",
+}), """\
+dhcp enable
+#
+interface Vlanif10
+ dhcp select relay
+ dhcp relay server-ip 192.168.200.254""")
+
+# ---- 文档 2.6 DHCP 主备（excluded-ip-address 由网段自动切半）----
+dhcp_common = {"mode": "backup", "if_vlan": "10", "gateway": "192.168.10.254",
+               "network": "192.168.10.0", "mask": "255.255.255.0", "dns": "192.168.200.88"}
+ok &= run("2.6c DHCP主池", dhcp.generate({**dhcp_common, "role": "primary"}), """\
+ip pool pool-vlan10
+ gateway-list 192.168.10.254
+ network 192.168.10.0 mask 255.255.255.0
+ excluded-ip-address 192.168.10.125 192.168.10.254
+ dns-list 192.168.200.88""")
+
+ok &= run("2.6d DHCP备池", dhcp.generate({**dhcp_common, "role": "secondary"}), """\
+ip pool pool-vlan10
+ gateway-list 192.168.10.254
+ network 192.168.10.0 mask 255.255.255.0
+ excluded-ip-address 192.168.10.1 192.168.10.124
+ excluded-ip-address 192.168.10.252 192.168.10.254
+ dns-list 192.168.200.88""")
+
+# ---- 文档 4.11 路由器 DHCP：全局地址池绑物理口（4.11 原文接口误写 dhcp select
+#      interface，按语义修正为 dhcp select global，与 2.6 服务器侧一致）----
+ok &= run("4.11 DHCP物理口", dhcp.generate({
+    "mode": "global", "if_kind": "port", "if_port": "GigabitEthernet0/0/1",
+    "gateway": "192.168.10.1", "network": "192.168.10.0",
+    "mask": "255.255.255.0", "dns": "192.168.200.88", "lease": "7",
+}), """\
+dhcp enable
+#
+ip pool pool-vlan10
+ gateway-list 192.168.10.1
+ network 192.168.10.0 mask 255.255.255.0
+ dns-list 192.168.200.88
+ lease day 7
+#
+interface GigabitEthernet0/0/1
+ dhcp select global""")
 
 # ---- 文档 2.2 VRRP：主10备20 / 主20备10 双机互备 ----
 vrrp_params = {
@@ -179,7 +223,7 @@ stp region-configuration
 stp instance 1 root primary
 stp instance 2 root secondary""")
 
-# ---- 文档 2.4 基础链路聚合 ----
+# ---- 文档 2.4 基础链路聚合（文档基础块本身带 mode lacp-static，v0.3 起输出该行）----
 ok &= run("2.4 链路聚合", eth_trunk.generate_full({
     "trunk_id": "1",
     "vlans": [{"vlan": "10"}, {"vlan": "20"}],
@@ -190,6 +234,7 @@ vlan batch 10 20
 interface Eth-Trunk1
  port link-type trunk
  port trunk allow-pass vlan 10 20
+ mode lacp-static
 interface GigabitEthernet0/0/22
  eth-trunk 1
 interface GigabitEthernet0/0/23
@@ -207,7 +252,50 @@ vlan 10
 interface Eth-Trunk1
  port link-type trunk
  port trunk allow-pass vlan 10
+ mode lacp-static
 interface Ethernet0/0/24
+ eth-trunk 1""")
+
+# ---- 文档 2.4 LACP 主2备1：主设备 ----
+lacp_params = {
+    "mode": "lacp", "trunk_id": "1",
+    "vlans": [{"vlan": "10"}, {"vlan": "20"}],
+    "members": [{"port": "GigabitEthernet0/0/22"},
+                {"port": "GigabitEthernet0/0/23"},
+                {"port": "GigabitEthernet0/0/24"}],
+    "system_priority": "100", "max_active": "2", "preempt_delay": "10",
+    "member_priority": "100",
+    "priority_ports": ["GigabitEthernet0/0/23", "GigabitEthernet0/0/24"],
+}
+ok &= run("2.4c LACP主设备", eth_trunk.generate_device(lacp_params, "master"), """\
+lacp system-priority 100
+interface Eth-Trunk1
+ port link-type trunk
+ port trunk allow-pass vlan 10 20
+ mode lacp-static
+ max active-linknumber 2
+ lacp preempt enable
+ lacp preempt delay 10
+interface GigabitEthernet0/0/22
+ eth-trunk 1
+interface GigabitEthernet0/0/23
+ eth-trunk 1
+ lacp priority 100
+interface GigabitEthernet0/0/24
+ eth-trunk 1
+ lacp priority 100""")
+
+ok &= run("2.4d LACP从设备", eth_trunk.generate_device(lacp_params, "slave"), """\
+interface Eth-Trunk1
+ port link-type trunk
+ port trunk allow-pass vlan 10 20
+ mode lacp-static
+ max active-linknumber 2
+interface GigabitEthernet0/0/22
+ eth-trunk 1
+interface GigabitEthernet0/0/23
+ eth-trunk 1
+interface GigabitEthernet0/0/24
  eth-trunk 1""")
 
 # ---- 文档 2.5 OSPF ----

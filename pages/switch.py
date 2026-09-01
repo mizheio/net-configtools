@@ -7,13 +7,14 @@ import tkinter as tk
 from tkinter import ttk
 
 from modules import if_vlan, vlanif, vrrp, mstp, eth_trunk
-from modules.base import collect_vlans, port_name
+from modules.base import PORT_TYPES, collect_vlans, port_name
 from widgets import PortField, RowsEditor
 
 
 # ============================================================ 接口 VLAN 页
 class IfVlanPage:
     TITLE = "接口VLAN"
+    OWN_SCROLL = True  # 自带行区滚动画布，App 装配时不再包外层 ScrollFrame
 
     def __init__(self, parent, app=None):
         self.frame = ttk.Frame(parent, padding=6)
@@ -58,12 +59,7 @@ class IfVlanPage:
         self.canvas.configure(yscrollcommand=sb.set)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.canvas.bind("<Enter>", lambda e: self.canvas.bind_all("<MouseWheel>", self._wheel))
-        self.canvas.bind("<Leave>", lambda e: self.canvas.unbind_all("<MouseWheel>"))
         self.build_rows()
-
-    def _wheel(self, event):
-        self.canvas.yview_scroll(int(-event.delta / 120), "units")
 
     def build_rows(self):
         # 重建前快照已填内容，批量调整端口范围/槽位时按行号保留，不再清空
@@ -401,43 +397,65 @@ class EthTrunkPage:
     def __init__(self, parent, app=None):
         self.frame = ttk.Frame(parent, padding=6)
         self.enabled = tk.BooleanVar(value=True)
+        self.app = app
         bar = ttk.Frame(self.frame)
-        bar.pack(fill=tk.X)
+        bar.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(bar, text="聚合口编号").pack(side=tk.LEFT)
+        self.trunk_id = tk.StringVar(value="1")
+        ttk.Entry(bar, textvariable=self.trunk_id, width=5).pack(side=tk.LEFT, padx=(2, 10))
         ttk.Button(bar, text="添加 VLAN", command=self.add_vlan).pack(side=tk.LEFT, padx=2)
         ttk.Button(bar, text="添加成员接口", command=self.add_member).pack(side=tk.LEFT, padx=2)
         ttk.Checkbutton(bar, text="参与汇总", variable=self.enabled).pack(side=tk.RIGHT)
-        f = ttk.Frame(self.frame)
-        f.pack(fill=tk.X, pady=1)
-        ttk.Label(f, text="聚合口编号", width=16).pack(side=tk.LEFT)
-        self.trunk_id = tk.StringVar(value="1")
-        ttk.Entry(f, textvariable=self.trunk_id, width=12).pack(side=tk.LEFT)
-        ttk.Label(self.frame, text="允许 VLAN（每行一个）", foreground="gray").pack(anchor=tk.W, pady=(5, 0))
+
+        ttk.Label(self.frame, text="放行 VLAN（每行一个）", foreground="gray").pack(anchor=tk.W, pady=(5, 0))
         self.vlan_editor = RowsEditor(self.frame, [("vlan", "VLAN", 12, "vlan")])
-        ttk.Label(self.frame, text="成员接口（每行一个，GE=千兆 / ETH=百兆，编号可含板卡号如 1/0/22）", foreground="gray").pack(anchor=tk.W, pady=(5, 0))
-        self.member_editor = RowsEditor(self.frame, [
-            ("port", "成员接口", 12, "port"),
-        ])
         self.add_vlan("10")
         self.add_vlan("20")
+
+        ttk.Label(self.frame, text="成员接口（每行一个；选择接口类型和编号）", foreground="gray").pack(anchor=tk.W, pady=(5, 0))
+        self.member_editor = RowsEditor(self.frame, [
+            ("port_type", "接口类型", 8, PORT_TYPES), ("port_num", "接口编号", 12, None),
+        ])
         self.add_member("GE", "0/0/22")
-        self.add_member("GE", "0/0/23")
+        self.add_member("ETH", "0/0/23")
         self.add_member("GE", "0/0/24")
 
+    
     def add_vlan(self, vlan=""):
         self.vlan_editor.add({"vlan": vlan})
 
     def add_member(self, port_type="GE", num=""):
-        self.member_editor.add({"port": (port_type, num)})
+        self.member_editor.add({"port_type": port_type, "port_num": num})
 
     def set_lib_values(self, ip_list, vlan_list):
         self.vlan_editor.set_lib_values(ip_list, vlan_list)
 
     def collect(self):
-        return {"trunk_id": self.trunk_id.get().strip(), "vlans": self.vlan_editor.values(),
-                "members": self.member_editor.values()}, []
+        members = []
+        for row in self.member_editor.values():
+            port_type = row.get("port_type", "GE")
+            port_num = row.get("port_num", "")
+            if port_type and port_num:
+                members.append({"type": port_type, "num": port_num})
+        
+        return {"trunk_id": self.trunk_id.get().strip(),
+                "vlans": self.vlan_editor.values(), "members": members}, []
 
     def validate(self, params):
-        return []
+        errors = []
+        
+        # 验证聚合口编号
+        if not params.get("trunk_id").isdigit():
+            errors.append("聚合口编号必须是数字")
+        
+        # 验证成员接口
+        for i, member in enumerate(params.get("members", [])):
+            if not member.get("type"):
+                errors.append(f"第{i+1}个成员接口缺少类型")
+            if not member.get("num"):
+                errors.append(f"第{i+1}个成员接口缺少编号")
+        
+        return errors
 
     def render(self, params):
         return eth_trunk.generate_full(params)
