@@ -1,22 +1,28 @@
-"""界面骨架：左侧 IP/VLAN 库 + 顶部模块页签 + 底部输出预览
+"""主窗口骨架：左侧 IP/VLAN 库 + 顶部模块页签 + 底部输出预览
 
-页面契约（每个模块页签固定三件事）：
+页面清单来自 pages/__init__.py 的 CATEGORY_PAGES 注册表，本文件不硬编码任何页面。
+页面契约（pages/ 下每个页类固定实现）：
+  TITLE                            页签标题
   collect()  -> (params, errors)   收集表单值
-  validate(params) -> errors       校验（IP/VLAN 格式）
-  render(params) -> str            调 modules 里的纯生成函数
-  set_lib_values(ip_list, vlan_list)  库变化时刷新本页所有下拉框
+  validate(params) -> errors       校验
+  render(params) -> str            单页生成（可含 vlan batch 头）
+  render_summary(params) -> str    汇总用正文（vlan batch 由 App 统一放头部）
+  summary_vlans(params) -> set     本页用到的 VLAN，供汇总头部去重
+  set_lib_values(ip_list, vlan_list)
+  enabled (tk.BooleanVar)          是否参与汇总
+  is_empty(params) -> bool（可选） 汇总时跳过空页
 生成按钮固定流程：collect -> validate -> generate -> 预览区
 """
-import ipaddress
 import json
 import os
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 
 import variables as varlib
-from modules import if_vlan, vlanif, dhcp, vrrp, mstp, eth_trunk, ospf, acl
-from modules.base import collect_vlans, port_name, render_vlan_batch
-from widgets import PortField, RowsEditor
+from modules import vrrp
+from modules.base import render_vlan_batch
+from pages import CATEGORY_PAGES
+from pages.switch import VrrpPage
 
 
 # ============================================================ IP / VLAN 库面板
@@ -75,603 +81,11 @@ class LibraryPanel:
         self.on_change()
 
 
-# ============================================================ 接口 VLAN 页
-class IfVlanPage:
-    def __init__(self, parent):
-        self.frame = ttk.Frame(parent, padding=6)
-        self.rows = []
-        self.enabled = tk.BooleanVar(value=True)
-        self._vlan_combos = []
-        self._vlan_values = []
-
-        bar = ttk.Frame(self.frame)
-        bar.pack(fill=tk.X, pady=(0, 4))
-        ttk.Label(bar, text="端口类型:").pack(side=tk.LEFT)
-        self.type_var = tk.StringVar(value="GE")
-        ttk.Combobox(bar, textvariable=self.type_var, values=("GE", "ETH"), width=5, state="readonly").pack(side=tk.LEFT, padx=(2, 6))
-        ttk.Label(bar, text="槽位:").pack(side=tk.LEFT)
-        self.slot_var = tk.StringVar(value="0/0")
-        ttk.Entry(bar, textvariable=self.slot_var, width=5).pack(side=tk.LEFT, padx=(2, 8))
-        ttk.Label(bar, text="起始口:").pack(side=tk.LEFT)
-        self.start_var = tk.IntVar(value=1)
-        ttk.Spinbox(bar, from_=1, to=48, textvariable=self.start_var, width=4).pack(side=tk.LEFT, padx=2)
-        ttk.Label(bar, text="结束口:").pack(side=tk.LEFT)
-        self.end_var = tk.IntVar(value=10)
-        ttk.Spinbox(bar, from_=1, to=48, textvariable=self.end_var, width=4).pack(side=tk.LEFT, padx=(2, 8))
-        ttk.Button(bar, text="生成接口列表", command=self.build_rows).pack(side=tk.LEFT, padx=2)
-        ttk.Button(bar, text="全选access", command=lambda: self.set_all("access")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(bar, text="全选trunk", command=lambda: self.set_all("trunk")).pack(side=tk.LEFT, padx=2)
-        ttk.Checkbutton(bar, text="参与汇总", variable=self.enabled).pack(side=tk.RIGHT)
-
-        head = ttk.Frame(self.frame)
-        head.pack(fill=tk.X)
-        for col, text, w in ((0, "勾选", 5), (1, "类型", 6), (2, "编号", 10), (3, "模式", 8),
-                             (4, "VLAN", 8), (5, "PVID", 8), (6, "allow-pass", 22)):
-            ttk.Label(head, text=text, width=w).grid(row=0, column=col, padx=2, sticky=tk.W)
-        head.columnconfigure(6, weight=1)
-
-        wrap = ttk.Frame(self.frame)
-        wrap.pack(fill=tk.BOTH, expand=True)
-        self.canvas = tk.Canvas(wrap, highlightthickness=0)
-        sb = ttk.Scrollbar(wrap, orient=tk.VERTICAL, command=self.canvas.yview)
-        self.inner = ttk.Frame(self.canvas)
-        self.inner.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
-        self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
-        self.canvas.configure(yscrollcommand=sb.set)
-        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        sb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.canvas.bind("<Enter>", lambda e: self.canvas.bind_all("<MouseWheel>", self._wheel))
-        self.canvas.bind("<Leave>", lambda e: self.canvas.unbind_all("<MouseWheel>"))
-        self.build_rows()
-
-    def _wheel(self, event):
-        self.canvas.yview_scroll(int(-event.delta / 120), "units")
-
-    def build_rows(self):
-        # 重建前快照已填内容，批量调整端口范围/槽位时按行号保留，不再清空
-        saved = [{k: row[k].get() for k in ("check", "type", "num", "mode", "vlan", "pvid", "allow")}
-                 for row in self.rows]
-        for w in self.inner.winfo_children():
-            w.destroy()
-        self.rows = []
-        self._vlan_combos = []
-        token = self.type_var.get()
-        slot = self.slot_var.get().strip().strip("/")
-        for num in range(self.start_var.get(), self.end_var.get() + 1):
-            row = {
-                "type": tk.StringVar(value=token),
-                "num": tk.StringVar(value=f"{slot}/{num}" if slot else str(num)),
-                "check": tk.BooleanVar(value=False),
-                "mode": tk.StringVar(value="access"),
-                "vlan": tk.StringVar(value=""),
-                "pvid": tk.StringVar(value=""),
-                "allow": tk.StringVar(value=""),
-            }
-            row["mode"].trace_add("write", lambda *_, r=row: self._update_row_state(r))
-            r = len(self.rows)
-            ttk.Checkbutton(self.inner, variable=row["check"]).grid(row=r, column=0, padx=2)
-            ttk.Combobox(self.inner, textvariable=row["type"], values=("GE", "ETH"),
-                         width=5, state="readonly").grid(row=r, column=1, padx=2)
-            ttk.Entry(self.inner, textvariable=row["num"], width=9).grid(row=r, column=2, padx=2)
-            ttk.Combobox(self.inner, textvariable=row["mode"], values=("access", "trunk"), width=7, state="readonly").grid(row=r, column=3, padx=2)
-            vlan_w = ttk.Combobox(self.inner, textvariable=row["vlan"], width=6)
-            vlan_w.grid(row=r, column=4, padx=2)
-            pvid_w = ttk.Combobox(self.inner, textvariable=row["pvid"], width=6)
-            pvid_w.grid(row=r, column=5, padx=2)
-            allow_w = ttk.Combobox(self.inner, textvariable=row["allow"], width=24)
-            allow_w.grid(row=r, column=6, padx=2, sticky=tk.W)
-            row["vlan_w"], row["pvid_w"], row["allow_w"] = vlan_w, pvid_w, allow_w
-            self._vlan_combos += [vlan_w, pvid_w, allow_w]
-            self._update_row_state(row)
-            self.rows.append(row)
-        for row, snap in zip(self.rows, saved):
-            for k in ("type", "num", "vlan", "pvid", "allow"):
-                row[k].set(snap[k])
-            row["check"].set(snap["check"])
-            row["mode"].set(snap["mode"])
-        self._apply_values()
-
-    def _update_row_state(self, row):
-        """access: 只能填 VLAN；trunk: 只能填 PVID 和 allow-pass，其余置灰"""
-        access = row["mode"].get() == "access"
-        row["vlan_w"].configure(state=tk.NORMAL if access else tk.DISABLED)
-        row["pvid_w"].configure(state=tk.DISABLED if access else tk.NORMAL)
-        row["allow_w"].configure(state=tk.DISABLED if access else tk.NORMAL)
-
-    def _apply_values(self):
-        for cb in self._vlan_combos:
-            cb["values"] = self._vlan_values
-
-    def set_lib_values(self, ip_list, vlan_list):
-        self._vlan_values = list(vlan_list)
-        self._apply_values()
-
-    def set_all(self, mode):
-        for row in self.rows:
-            row["mode"].set(mode)
-
-    def collect(self):
-        ports = []
-        for row in self.rows:
-            if not row["check"].get():
-                continue
-            port = {"type": row["type"].get(), "num": row["num"].get().strip(), "mode": row["mode"].get()}
-            if port["mode"] == "access":
-                port["vlan"] = row["vlan"].get().strip()
-            else:
-                pvid = row["pvid"].get().strip()
-                if pvid:
-                    port["pvid"] = pvid
-                port["allow"] = row["allow"].get().strip()
-            ports.append(port)
-        return {"ports": ports}, []
-
-    def validate(self, params):
-        errors = []
-        for p in params["ports"]:
-            label = port_name(p["type"], p["num"])
-            if p["mode"] == "access":
-                if not str(p.get("vlan", "")).isdigit():
-                    errors.append(f"{label}: access 模式必须填数字 VLAN")
-            else:
-                if not p.get("allow"):
-                    errors.append(f"{label}: trunk 模式必须填 allow-pass VLAN（空格分隔）")
-                for v in str(p.get("allow", "")).split():
-                    if not v.isdigit():
-                        errors.append(f"{label}: allow-pass 含非数字值 {v}")
-                if p.get("pvid") and not str(p["pvid"]).isdigit():
-                    errors.append(f"{label}: PVID 必须是数字")
-        return errors
-
-    def render(self, params):
-        return if_vlan.generate_full(params)
-
-
-# ============================================================ 三层网关页
-class VlanifPage:
-    def __init__(self, parent):
-        self.frame = ttk.Frame(parent, padding=6)
-        self.rows = []
-        self.enabled = tk.BooleanVar(value=True)
-        self._ip_combos = []
-        self._vlan_combos = []
-        self._ip_values = []
-        self._vlan_values = []
-
-        bar = ttk.Frame(self.frame)
-        bar.pack(fill=tk.X, pady=(0, 4))
-        ttk.Button(bar, text="添加一行", command=self.add_row).pack(side=tk.LEFT, padx=2)
-        ttk.Checkbutton(bar, text="参与汇总", variable=self.enabled).pack(side=tk.RIGHT)
-
-        head = ttk.Frame(self.frame)
-        head.pack(fill=tk.X)
-        ttk.Label(head, text="VLAN ID", width=10).grid(row=0, column=0, padx=2)
-        ttk.Label(head, text="IP 地址", width=24).grid(row=0, column=1, padx=2)
-        ttk.Label(head, text="掩码", width=18).grid(row=0, column=2, padx=2)
-
-        self.area = ttk.Frame(self.frame)
-        self.area.pack(fill=tk.BOTH, expand=True)
-        self.add_row()
-
-    def add_row(self):
-        row = {"vlan": tk.StringVar(), "ip": tk.StringVar(), "mask": tk.StringVar(value="255.255.255.0")}
-        f = ttk.Frame(self.area)
-        f.pack(fill=tk.X, pady=1)
-        vlan_w = ttk.Combobox(f, textvariable=row["vlan"], width=8, values=self._vlan_values)
-        vlan_w.pack(side=tk.LEFT, padx=2)
-        ip_w = ttk.Combobox(f, textvariable=row["ip"], width=22, values=self._ip_values)
-        ip_w.pack(side=tk.LEFT, padx=2)
-        ttk.Entry(f, textvariable=row["mask"], width=16).pack(side=tk.LEFT, padx=2)
-        ttk.Button(f, text="删", width=3, command=lambda: self.del_row(row)).pack(side=tk.LEFT, padx=2)
-        row["frame"] = f
-        self._vlan_combos.append(vlan_w)
-        self._ip_combos.append(ip_w)
-        self.rows.append(row)
-
-    def del_row(self, row):
-        row["frame"].destroy()
-        self.rows.remove(row)
-
-    def set_lib_values(self, ip_list, vlan_list):
-        self._ip_values, self._vlan_values = list(ip_list), list(vlan_list)
-        for cb in self._ip_combos:
-            cb["values"] = self._ip_values
-        for cb in self._vlan_combos:
-            cb["values"] = self._vlan_values
-
-    def collect(self):
-        ifaces = []
-        for row in self.rows:
-            vlan = row["vlan"].get().strip()
-            ip = row["ip"].get().strip()
-            if vlan or ip:
-                ifaces.append({"vlan": vlan, "ip": ip, "mask": row["mask"].get().strip()})
-        return {"ifaces": ifaces}, []
-
-    def validate(self, params):
-        errors = []
-        for i in params["ifaces"]:
-            if not i["vlan"].isdigit():
-                errors.append(f"Vlanif: VLAN ID {i['vlan'] or '(空)'} 必须是数字")
-            for field in ("ip", "mask"):
-                try:
-                    ipaddress.ip_address(i[field])
-                except ValueError:
-                    errors.append(f"Vlanif{i['vlan']}: {field} {i[field]} 不是合法地址")
-        return errors
-
-    def render(self, params):
-        return vlanif.generate(params)
-
-
-# ============================================================ DHCP 页（仅全局地址池）
-class DhcpPage:
-    def __init__(self, parent):
-        self.frame = ttk.Frame(parent, padding=6)
-        self.enabled = tk.BooleanVar(value=True)
-        self._ip_combos = []
-        self._vlan_combos = []
-        self._ip_values = []
-        self._vlan_values = []
-
-        bar = ttk.Frame(self.frame)
-        bar.pack(fill=tk.X, pady=(0, 6))
-        ttk.Label(bar, text="DHCP 全局地址池").pack(side=tk.LEFT)
-        ttk.Checkbutton(bar, text="参与汇总", variable=self.enabled).pack(side=tk.RIGHT)
-
-        self.v_if = self._field("VLAN ID", kind="vlan")
-        self.v_gw = self._field("网关IP")
-        self.v_net = self._field("网段")
-        self.v_mask = self._field("掩码", default="255.255.255.0", kind=None)
-        self.v_dns = self._field("DNS")
-        self.v_lease = self._field("租期(天)", default="7", kind=None)
-
-    def _field(self, label, default="", kind="ip"):
-        var = tk.StringVar(value=default)
-        f = ttk.Frame(self.frame)
-        f.pack(fill=tk.X, pady=1)
-        ttk.Label(f, text=label, width=12).pack(side=tk.LEFT)
-        if kind is None:
-            ttk.Entry(f, textvariable=var, width=18).pack(side=tk.LEFT)
-        else:
-            values = self._ip_values if kind == "ip" else self._vlan_values
-            cb = ttk.Combobox(f, textvariable=var, values=values, width=18)
-            cb.pack(side=tk.LEFT)
-            (self._ip_combos if kind == "ip" else self._vlan_combos).append(cb)
-        return var
-
-    def set_lib_values(self, ip_list, vlan_list):
-        self._ip_values, self._vlan_values = list(ip_list), list(vlan_list)
-        for cb in self._ip_combos:
-            cb["values"] = self._ip_values
-        for cb in self._vlan_combos:
-            cb["values"] = self._vlan_values
-
-    def collect(self):
-        return {"if_vlan": self.v_if.get().strip(),
-                "gateway": self.v_gw.get().strip(),
-                "network": self.v_net.get().strip(),
-                "mask": self.v_mask.get().strip(),
-                "dns": self.v_dns.get().strip(),
-                "lease": self.v_lease.get().strip() or "7"}, []
-
-    def is_empty(self, params):
-        keys = [k for k in params if k != "lease"]
-        return all(not str(params[k]) for k in keys)
-
-    def validate(self, params):
-        errors = []
-
-        def ip_chk(value, name):
-            if not value:
-                errors.append(f"DHCP: 缺少{name}")
-                return
-            try:
-                ipaddress.ip_address(value)
-            except ValueError:
-                errors.append(f"DHCP: {name} {value} 不是合法IP")
-
-        if not params.get("if_vlan", "").isdigit():
-            errors.append("DHCP: VLAN ID 必须是数字")
-        ip_chk(params["gateway"], "网关IP")
-        ip_chk(params["network"], "网段")
-        ip_chk(params["dns"], "DNS")
-        if not params["lease"].isdigit():
-            errors.append("DHCP: 租期必须是数字")
-        return errors
-
-    def render(self, params):
-        return dhcp.generate(params)
-
-
-# ============================================================ VRRP 双机热备页
-class VrrpPage:
-    def __init__(self, parent, on_generate):
-        self.frame = ttk.Frame(parent, padding=6)
-        self.enabled = tk.BooleanVar(value=True)
-        self.on_generate = on_generate
-
-        bar = ttk.Frame(self.frame)
-        bar.pack(fill=tk.X)
-        ttk.Button(bar, text="添加 VLAN", command=self.add_plan).pack(side=tk.LEFT, padx=2)
-        ttk.Button(bar, text="生成设备 1", command=lambda: self.on_generate("device1")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(bar, text="生成设备 2", command=lambda: self.on_generate("device2")).pack(side=tk.LEFT, padx=2)
-        ttk.Button(bar, text="一键生成两台", command=lambda: self.on_generate("pair")).pack(side=tk.LEFT, padx=2)
-        ttk.Checkbutton(bar, text="参与汇总", variable=self.enabled).pack(side=tk.RIGHT)
-
-        common = ttk.Frame(self.frame)
-        common.pack(fill=tk.X, pady=2)
-        ttk.Label(common, text="认证密码", width=12).pack(side=tk.LEFT)
-        self.auth = tk.StringVar(value="admin123")
-        ttk.Entry(common, textvariable=self.auth, width=18).pack(side=tk.LEFT)
-        ttk.Label(common, text="汇总设备", width=10).pack(side=tk.LEFT, padx=(18, 0))
-        self.summary_role = tk.StringVar(value="设备 1")
-        ttk.Combobox(common, textvariable=self.summary_role, values=("设备 1", "设备 2"),
-                     width=12, state="readonly").pack(side=tk.LEFT)
-
-        ttk.Label(self.frame, text="VRRP VLAN 规划（每行分别设置设备 1、设备 2 的 VRRP 主/备角色）", foreground="gray").pack(anchor=tk.W, pady=(4, 0))
-        self.plan_editor = RowsEditor(self.frame, [
-            ("vlan", "VLAN", 8, "vlan"), ("mask", "掩码", 16, None),
-            ("virtual_ip", "虚拟 IP", 16, "ip"), ("device1_ip", "设备 1 IP", 16, "ip"),
-            ("device1_role", "设备 1 角色", 10, ("主", "备")), ("device2_ip", "设备 2 IP", 16, "ip"),
-            ("device2_role", "设备 2 角色", 10, ("主", "备")),
-        ])
-        self.add_plan("10", "192.168.10.254", "192.168.10.252", "主", "192.168.10.253", "备")
-        self.add_plan("20", "192.168.20.254", "192.168.20.252", "备", "192.168.20.253", "主")
-
-        primary = ttk.LabelFrame(self.frame, text=" 所有“主”角色接口的通用参数 ", padding=5)
-        primary.pack(fill=tk.X, pady=(7, 0))
-        self.priority = self._card_field(primary, "优先级", "120")
-        self.preempt_delay = self._card_field(primary, "抢占延时(秒)", "10")
-        self.track_port = self._card_port(primary, "跟踪接口", "GE", "0/0/6")
-        self.track_reduced = self._card_field(primary, "跟踪降级值", "50")
-
-    def _card_field(self, parent, label, default):
-        f = ttk.Frame(parent)
-        f.pack(fill=tk.X, pady=1)
-        ttk.Label(f, text=label, width=14).pack(side=tk.LEFT)
-        var = tk.StringVar(value=default)
-        ttk.Entry(f, textvariable=var, width=22).pack(side=tk.LEFT)
-        return var
-
-    def _card_port(self, parent, label, port_type, num):
-        f = ttk.Frame(parent)
-        f.pack(fill=tk.X, pady=1)
-        ttk.Label(f, text=label, width=14).pack(side=tk.LEFT)
-        field = PortField(f)
-        field.set(port_type, num)
-        field.pack(side=tk.LEFT)
-        return field
-
-    def add_plan(self, vlan="", virtual_ip="", device1_ip="", device1_role="主", device2_ip="", device2_role="备"):
-        self.plan_editor.add({"vlan": vlan, "mask": "255.255.255.0", "virtual_ip": virtual_ip,
-                              "device1_ip": device1_ip, "device1_role": device1_role,
-                              "device2_ip": device2_ip, "device2_role": device2_role})
-
-    def set_lib_values(self, ip_list, vlan_list):
-        self.plan_editor.set_lib_values(ip_list, vlan_list)
-
-    def collect(self):
-        plans = self.plan_editor.values()
-        for row in plans:
-            row["device1_role"] = "primary" if row["device1_role"] == "主" else "secondary"
-            row["device2_role"] = "primary" if row["device2_role"] == "主" else "secondary"
-        return {"priority": self.priority.get().strip(), "preempt_delay": self.preempt_delay.get().strip(),
-                "track_interface": self.track_port.get(), "track_reduced": self.track_reduced.get().strip(),
-                "auth": self.auth.get().strip(),
-                "summary_role": "device1" if self.summary_role.get() == "设备 1" else "device2",
-                "plans": plans}, []
-
-    def validate(self, params):
-        return []
-
-    def render(self, params):
-        return vrrp.generate_pair(params)
-
-
-# ============================================================ MSTP 页
-class MstpPage:
-    def __init__(self, parent):
-        self.frame = ttk.Frame(parent, padding=6)
-        self.enabled = tk.BooleanVar(value=True)
-        bar = ttk.Frame(self.frame)
-        bar.pack(fill=tk.X)
-        ttk.Button(bar, text="添加实例", command=self.add_row).pack(side=tk.LEFT, padx=2)
-        ttk.Checkbutton(bar, text="参与汇总", variable=self.enabled).pack(side=tk.RIGHT)
-        f = ttk.Frame(self.frame)
-        f.pack(fill=tk.X, pady=3)
-        ttk.Label(f, text="区域名", width=12).pack(side=tk.LEFT)
-        self.region_name = tk.StringVar(value="HUAWEI")
-        ttk.Entry(f, textvariable=self.region_name, width=20).pack(side=tk.LEFT)
-        self.editor = RowsEditor(self.frame, [
-            ("instance", "实例", 8, None), ("vlan", "VLAN", 8, "vlan"),
-            ("root", "本机根桥角色", 12, ("primary", "secondary")),
-        ])
-        self.add_row("1", "10", "primary")
-        self.add_row("2", "20", "secondary")
-
-    def add_row(self, instance="", vlan="", root="primary"):
-        self.editor.add({"instance": instance, "vlan": vlan, "root": root})
-
-    def set_lib_values(self, ip_list, vlan_list):
-        self.editor.set_lib_values(ip_list, vlan_list)
-
-    def collect(self):
-        return {"region_name": self.region_name.get().strip(), "instances": self.editor.values()}, []
-
-    def validate(self, params):
-        return []
-
-    def render(self, params):
-        return mstp.generate_full(params)
-
-
-# ============================================================ 链路聚合页
-class EthTrunkPage:
-    def __init__(self, parent):
-        self.frame = ttk.Frame(parent, padding=6)
-        self.enabled = tk.BooleanVar(value=True)
-        bar = ttk.Frame(self.frame)
-        bar.pack(fill=tk.X)
-        ttk.Button(bar, text="添加 VLAN", command=self.add_vlan).pack(side=tk.LEFT, padx=2)
-        ttk.Button(bar, text="添加成员接口", command=self.add_member).pack(side=tk.LEFT, padx=2)
-        ttk.Checkbutton(bar, text="参与汇总", variable=self.enabled).pack(side=tk.RIGHT)
-        f = ttk.Frame(self.frame)
-        f.pack(fill=tk.X, pady=1)
-        ttk.Label(f, text="聚合口编号", width=16).pack(side=tk.LEFT)
-        self.trunk_id = tk.StringVar(value="1")
-        ttk.Entry(f, textvariable=self.trunk_id, width=12).pack(side=tk.LEFT)
-        ttk.Label(self.frame, text="允许 VLAN（每行一个）", foreground="gray").pack(anchor=tk.W, pady=(5, 0))
-        self.vlan_editor = RowsEditor(self.frame, [("vlan", "VLAN", 12, "vlan")])
-        ttk.Label(self.frame, text="成员接口（每行一个，GE=千兆 / ETH=百兆，编号可含板卡号如 1/0/22）", foreground="gray").pack(anchor=tk.W, pady=(5, 0))
-        self.member_editor = RowsEditor(self.frame, [
-            ("port", "成员接口", 12, "port"),
-        ])
-        self.add_vlan("10")
-        self.add_vlan("20")
-        self.add_member("GE", "0/0/22")
-        self.add_member("GE", "0/0/23")
-        self.add_member("GE", "0/0/24")
-
-    def add_vlan(self, vlan=""):
-        self.vlan_editor.add({"vlan": vlan})
-
-    def add_member(self, port_type="GE", num=""):
-        self.member_editor.add({"port": (port_type, num)})
-
-    def set_lib_values(self, ip_list, vlan_list):
-        self.vlan_editor.set_lib_values(ip_list, vlan_list)
-
-    def collect(self):
-        return {"trunk_id": self.trunk_id.get().strip(), "vlans": self.vlan_editor.values(),
-                "members": self.member_editor.values()}, []
-
-    def validate(self, params):
-        return []
-
-    def render(self, params):
-        return eth_trunk.generate_full(params)
-
-
-# ============================================================ OSPF 页
-class OspfPage:
-    def __init__(self, parent):
-        self.frame = ttk.Frame(parent, padding=6)
-        self.enabled = tk.BooleanVar(value=True)
-        bar = ttk.Frame(self.frame)
-        bar.pack(fill=tk.X)
-        ttk.Button(bar, text="添加 network", command=self.add_row).pack(side=tk.LEFT, padx=2)
-        ttk.Checkbutton(bar, text="参与汇总", variable=self.enabled).pack(side=tk.RIGHT)
-        self.process_id = self._field("进程号", "1")
-        self.router_id = self._field("Router-ID", "10.1.1.1")
-        self.area = self._field("Area", "0.0.0.0")
-        self.editor = RowsEditor(self.frame, [
-            ("network", "网络地址", 20, "ip"), ("wildcard", "反掩码", 18, None),
-        ])
-        self.add_row()
-
-    def _field(self, label, default):
-        f = ttk.Frame(self.frame)
-        f.pack(fill=tk.X, pady=1)
-        ttk.Label(f, text=label, width=12).pack(side=tk.LEFT)
-        var = tk.StringVar(value=default)
-        ttk.Entry(f, textvariable=var, width=20).pack(side=tk.LEFT)
-        return var
-
-    def add_row(self):
-        self.editor.add({"wildcard": "0.0.0.255"})
-
-    def set_lib_values(self, ip_list, vlan_list):
-        self.editor.set_lib_values(ip_list, vlan_list)
-
-    def collect(self):
-        return {"process_id": self.process_id.get().strip(), "router_id": self.router_id.get().strip(),
-                "area": self.area.get().strip(), "networks": self.editor.values()}, []
-
-    def validate(self, params):
-        return []
-
-    def render(self, params):
-        return ospf.generate(params)
-
-
-# ============================================================ ACL 页
-class AclPage:
-    def __init__(self, parent):
-        self.frame = ttk.Frame(parent, padding=6)
-        self.enabled = tk.BooleanVar(value=True)
-        bar = ttk.Frame(self.frame)
-        bar.pack(fill=tk.X)
-        ttk.Button(bar, text="添加规则", command=self.add_row).pack(side=tk.LEFT, padx=2)
-        ttk.Checkbutton(bar, text="参与汇总", variable=self.enabled).pack(side=tk.RIGHT)
-        f = ttk.Frame(self.frame)
-        f.pack(fill=tk.X, pady=1)
-        ttk.Label(f, text="ACL 类型", width=12).pack(side=tk.LEFT)
-        self.acl_type = tk.StringVar(value="advanced")
-        ttk.Combobox(f, textvariable=self.acl_type, values=("basic", "advanced"), width=12, state="readonly").pack(side=tk.LEFT)
-        ttk.Label(f, text="ACL 编号").pack(side=tk.LEFT, padx=(12, 2))
-        self.acl_number = tk.StringVar(value="3000")
-        ttk.Entry(f, textvariable=self.acl_number, width=10).pack(side=tk.LEFT)
-        self.bind_port = self._port_field("绑定接口（可空）", "GE", "0/0/1")
-        self.direction = self._field("过滤方向", "inbound")
-        ttk.Label(self.frame, text="普通 ACL 忽略目的地址列；高级 ACL 使用来源与目的地址。", foreground="gray").pack(anchor=tk.W)
-        self.editor = RowsEditor(self.frame, [
-            ("action", "动作", 8, ("permit", "deny")), ("source", "源地址", 16, "ip"),
-            ("source_wildcard", "源反掩码", 16, None), ("destination", "目的地址", 16, "ip"),
-            ("destination_wildcard", "目的反掩码", 16, None),
-        ])
-        self.add_row()
-        self.acl_type.trace_add("write", lambda *_: self._update_type())
-        self._update_type()
-
-    def _field(self, label, default):
-        f = ttk.Frame(self.frame)
-        f.pack(fill=tk.X, pady=1)
-        ttk.Label(f, text=label, width=18).pack(side=tk.LEFT)
-        var = tk.StringVar(value=default)
-        ttk.Entry(f, textvariable=var, width=28).pack(side=tk.LEFT)
-        return var
-
-    def _port_field(self, label, port_type, num):
-        f = ttk.Frame(self.frame)
-        f.pack(fill=tk.X, pady=1)
-        ttk.Label(f, text=label, width=18).pack(side=tk.LEFT)
-        field = PortField(f)
-        field.set(port_type, num)
-        field.pack(side=tk.LEFT)
-        return field
-
-    def add_row(self):
-        self.editor.add({"action": "permit", "source_wildcard": "0.0.0.255", "destination_wildcard": "0.0.0.255"})
-        self._update_type()
-
-    def _update_type(self):
-        """基础 ACL 不需要目的地址；选择高级 ACL 后开放相关字段。"""
-        advanced = self.acl_type.get() == "advanced"
-        for row in self.editor.rows:
-            for key in ("destination", "destination_wildcard"):
-                row["widgets"][key].configure(state=tk.NORMAL if advanced else tk.DISABLED)
-
-    def set_lib_values(self, ip_list, vlan_list):
-        self.editor.set_lib_values(ip_list, vlan_list)
-
-    def collect(self):
-        return {"acl_type": self.acl_type.get().strip(), "acl_number": self.acl_number.get().strip(),
-                "bind_interface": self.bind_port.get(), "direction": self.direction.get().strip(),
-                "rules": self.editor.values()}, []
-
-    def validate(self, params):
-        return []
-
-    def render(self, params):
-        return acl.generate(params)
-
-
 # ============================================================ 主窗口
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("华为 eNSP 配置生成工具 v0.2")
+        root.title("华为 eNSP 配置生成工具 v0.3")
         root.geometry("1020x720")
 
         paned = ttk.PanedWindow(root, orient=tk.VERTICAL)
@@ -683,24 +97,30 @@ class App:
         self.lib_panel = LibraryPanel(top, on_change=self._sync_lib)
         top.add(self.lib_panel.frame, weight=1)
 
-        self.nb = ttk.Notebook(top)
-        top.add(self.nb, weight=3)
-        self.page_if = IfVlanPage(self.nb)
-        self.page_vlanif = VlanifPage(self.nb)
-        self.page_dhcp = DhcpPage(self.nb)
-        self.page_vrrp = VrrpPage(self.nb, self.generate_vrrp_device)
-        self.page_mstp = MstpPage(self.nb)
-        self.page_trunk = EthTrunkPage(self.nb)
-        self.page_ospf = OspfPage(self.nb)
-        self.page_acl = AclPage(self.nb)
-        self.nb.add(self.page_if.frame, text=" 接口VLAN ")
-        self.nb.add(self.page_vlanif.frame, text=" 三层网关 ")
-        self.nb.add(self.page_dhcp.frame, text=" DHCP ")
-        self.nb.add(self.page_vrrp.frame, text=" VRRP ")
-        self.nb.add(self.page_mstp.frame, text=" MSTP ")
-        self.nb.add(self.page_trunk.frame, text=" 链路聚合 ")
-        self.nb.add(self.page_ospf.frame, text=" OSPF ")
-        self.nb.add(self.page_acl.frame, text=" ACL ")
+        right = ttk.Frame(top)
+        top.add(right, weight=3)
+
+        # 设备类别切换：页签按 CATEGORY_PAGES 过滤，页面实例常驻（切走再切回不丢表单）
+        bar = ttk.Frame(right)
+        bar.pack(fill=tk.X)
+        ttk.Label(bar, text="设备类型:").pack(side=tk.LEFT)
+        self.category_var = tk.StringVar(value="交换机")
+        self.category_box = ttk.Combobox(bar, textvariable=self.category_var,
+                                         values=tuple(CATEGORY_PAGES), width=8, state="readonly")
+        self.category_box.pack(side=tk.LEFT, padx=(2, 8))
+        self.category_box.bind("<<ComboboxSelected>>", lambda *_: self._rebuild_tabs())
+
+        self.nb = ttk.Notebook(right)
+        self.nb.pack(fill=tk.BOTH, expand=True)
+
+        # 按注册表装配页面；双栖页面（DHCP/OSPF/ACL）在两个类别间共享同一实例
+        self._page_by_cls = {}
+        for category, classes in CATEGORY_PAGES.items():
+            for cls in classes:
+                if cls not in self._page_by_cls:
+                    page = cls(self.nb, app=self)
+                    self._page_by_cls[cls] = page
+        self._rebuild_tabs()
         self._sync_lib()
 
         bottom = ttk.Frame(paned, padding=4)
@@ -722,11 +142,27 @@ class App:
 
         self.last_params = {}
 
+    # ---------- 页签装配 ----------
+    def _current_pages(self):
+        """当前设备类别的页面实例列表（页签顺序即注册表顺序）"""
+        return [self._page_by_cls[cls] for cls in CATEGORY_PAGES[self.category_var.get()]]
+
+    def _rebuild_tabs(self):
+        selected = self.nb.select()
+        last_title = self.nb.tab(selected, "text").strip() if selected else None
+        self.nb.forget(*self.nb.tabs())
+        for page in self._current_pages():
+            self.nb.add(page.frame, text=f" {page.TITLE} ")
+        if last_title:
+            for i in range(self.nb.index("end")):
+                if self.nb.tab(i, "text").strip() == last_title:
+                    self.nb.select(i)
+                    break
+
     def _sync_lib(self):
         """库变化时把 IP / VLAN 选项刷新到所有页面的下拉框"""
         lib = self.lib_panel.lib
-        for page in (self.page_if, self.page_vlanif, self.page_dhcp, self.page_vrrp,
-                     self.page_mstp, self.page_trunk, self.page_ospf, self.page_acl):
+        for page in self._page_by_cls.values():
             page.set_lib_values(lib["ip"], lib["vlan"])
 
     # ---------- 生成流程：collect -> validate -> generate ----------
@@ -736,9 +172,7 @@ class App:
         return params, errors
 
     def generate_current(self):
-        pages = (self.page_if, self.page_vlanif, self.page_dhcp, self.page_vrrp,
-                 self.page_mstp, self.page_trunk, self.page_ospf, self.page_acl)
-        page = pages[self.nb.index(self.nb.select())]
+        page = self._current_pages()[self.nb.index(self.nb.select())]
         params, errors = self._prepare(page)
         if errors:
             messagebox.showwarning("无法生成", "\n".join(errors))
@@ -752,7 +186,8 @@ class App:
 
     def generate_vrrp_device(self, target):
         """VRRP 页专用按钮：生成主、备之一，或在预览中并列显示两份脚本。"""
-        params, errors = self._prepare(self.page_vrrp)
+        page = self._page_by_cls[VrrpPage]
+        params, errors = self._prepare(page)
         if errors:
             messagebox.showwarning("无法生成", "\n".join(errors))
             return
@@ -767,62 +202,20 @@ class App:
         self.set_preview(text)
 
     def generate_all(self):
+        """按当前设备类别汇总：正文拼接，VLAN 去重后统一放头部 vlan batch"""
         blocks, errors, vlans, all_params = [], [], set(), {}
-
-        if self.page_if.enabled.get():
-            params, errs = self._prepare(self.page_if)
-            errors += errs
-            if params["ports"]:
-                all_params["if_vlan"] = params
-                blocks.append(if_vlan.generate(params))
-                vlans |= set(collect_vlans(params["ports"]))
-
-        if self.page_vlanif.enabled.get():
-            params, errs = self._prepare(self.page_vlanif)
-            errors += errs
-            if params["ifaces"]:
-                all_params["vlanif"] = params
-                blocks.append(vlanif.generate(params))
-                vlans |= {int(i["vlan"]) for i in params["ifaces"]}
-
-        if self.page_dhcp.enabled.get():
-            params, errs = self._prepare(self.page_dhcp)
-            errors += errs
-            if not self.page_dhcp.is_empty(params):
-                all_params["dhcp"] = params
-                blocks.append(dhcp.generate(params))
-                if params.get("if_vlan", "").isdigit():
-                    vlans.add(int(params["if_vlan"]))
-
-        # VRRP 是双机配置。汇总时只能选择主或备之一，绝不把两份配置混入同一台设备。
-        if self.page_vrrp.enabled.get():
-            params, errs = self._prepare(self.page_vrrp)
-            errors += errs
-            target = params["summary_role"]
-            block = vrrp.generate_device(params, target)
-            if block:
-                all_params["vrrp"] = {"target": target, **params}
-                blocks.append(block)
-                vlans |= set(vrrp.collect_vlans(params))
-
-        # v0.2 三层交换机模块。模块自身只生成正文，汇总时在这里统一生成 vlan batch。
-        extra_pages = (
-            ("mstp", self.page_mstp, mstp.generate, mstp.collect_vlans),
-            ("eth_trunk", self.page_trunk, eth_trunk.generate, eth_trunk.collect_vlans),
-            ("ospf", self.page_ospf, ospf.generate, None),
-            ("acl", self.page_acl, acl.generate, None),
-        )
-        for name, page, generator, vlan_collector in extra_pages:
+        for page in self._current_pages():
             if not page.enabled.get():
                 continue
             params, errs = self._prepare(page)
             errors += errs
-            block = generator(params)
+            if getattr(page, "is_empty", None) and page.is_empty(params):
+                continue
+            block = page.render_summary(params)
             if block:
-                all_params[name] = params
+                all_params[page.TITLE] = params
                 blocks.append(block)
-                if vlan_collector:
-                    vlans |= set(vlan_collector(params))
+                vlans |= page.summary_vlans(params)
 
         if errors:
             messagebox.showwarning("无法生成", "\n".join(errors))
