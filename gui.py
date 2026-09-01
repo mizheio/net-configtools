@@ -16,6 +16,7 @@ from tkinter import ttk, messagebox, filedialog, simpledialog
 import variables as varlib
 from modules import if_vlan, vlanif, dhcp, vrrp, mstp, eth_trunk, ospf, acl
 from modules.base import collect_vlans, port_name, render_vlan_batch
+from widgets import PortField, RowsEditor
 
 
 # ============================================================ IP / VLAN 库面板
@@ -383,64 +384,6 @@ class DhcpPage:
         return dhcp.generate(params)
 
 
-# ============================================================ 通用动态行编辑器
-class RowsEditor:
-    """轻量的“添加一行 / 删除一行”表单，供 VRRP、MSTP、OSPF、ACL 共用。"""
-
-    def __init__(self, parent, columns):
-        self.columns = columns  # (字段名, 标题, 宽度, 类型/可选值)
-        self.rows = []
-        self.next_grid_row = 1
-        self.ip_values, self.vlan_values = [], []
-        self.area = ttk.Frame(parent)
-        self.area.pack(fill=tk.X, pady=(2, 4))
-        # 表头与输入控件共用同一个 grid，避免 Label 和 Combobox 宽度不同造成列错位。
-        for col, (_, label, _, _) in enumerate(columns):
-            ttk.Label(self.area, text=label, anchor=tk.W).grid(row=0, column=col, padx=2, sticky="ew")
-        ttk.Label(self.area, text="").grid(row=0, column=len(columns), padx=2)
-
-    def add(self, defaults=None):
-        defaults = defaults or {}
-        grid_row = self.next_grid_row
-        self.next_grid_row += 1
-        row = {"widgets": {}}
-        for col, (key, _, width, kind) in enumerate(self.columns):
-            var = tk.StringVar(value=defaults.get(key, ""))
-            row[key] = var
-            if kind == "ip":
-                widget = ttk.Combobox(self.area, textvariable=var, values=self.ip_values, width=width)
-            elif kind == "vlan":
-                widget = ttk.Combobox(self.area, textvariable=var, values=self.vlan_values, width=width)
-            elif isinstance(kind, tuple):
-                widget = ttk.Combobox(self.area, textvariable=var, values=kind, width=width, state="readonly")
-            else:
-                widget = ttk.Entry(self.area, textvariable=var, width=width)
-            widget.grid(row=grid_row, column=col, padx=2, pady=1, sticky="ew")
-            row["widgets"][key] = widget
-        delete_button = ttk.Button(self.area, text="删", width=3, command=lambda: self.delete(row))
-        delete_button.grid(row=grid_row, column=len(self.columns), padx=2, pady=1)
-        row["delete_button"] = delete_button
-        self.rows.append(row)
-
-    def delete(self, row):
-        for widget in row["widgets"].values():
-            widget.destroy()
-        row["delete_button"].destroy()
-        self.rows.remove(row)
-
-    def values(self):
-        return [{key: row[key].get().strip() for key, *_ in self.columns} for row in self.rows]
-
-    def set_lib_values(self, ip_list, vlan_list):
-        self.ip_values, self.vlan_values = list(ip_list), list(vlan_list)
-        for row in self.rows:
-            for key, _, _, kind in self.columns:
-                if kind == "ip":
-                    row["widgets"][key]["values"] = self.ip_values
-                elif kind == "vlan":
-                    row["widgets"][key]["values"] = self.vlan_values
-
-
 # ============================================================ VRRP 双机热备页
 class VrrpPage:
     def __init__(self, parent, on_generate):
@@ -480,7 +423,7 @@ class VrrpPage:
         primary.pack(fill=tk.X, pady=(7, 0))
         self.priority = self._card_field(primary, "优先级", "120")
         self.preempt_delay = self._card_field(primary, "抢占延时(秒)", "10")
-        self.track_interface = self._card_field(primary, "跟踪接口", "GigabitEthernet0/0/6")
+        self.track_port = self._card_port(primary, "跟踪接口", "GE", "0/0/6")
         self.track_reduced = self._card_field(primary, "跟踪降级值", "50")
 
     def _card_field(self, parent, label, default):
@@ -490,6 +433,15 @@ class VrrpPage:
         var = tk.StringVar(value=default)
         ttk.Entry(f, textvariable=var, width=22).pack(side=tk.LEFT)
         return var
+
+    def _card_port(self, parent, label, port_type, num):
+        f = ttk.Frame(parent)
+        f.pack(fill=tk.X, pady=1)
+        ttk.Label(f, text=label, width=14).pack(side=tk.LEFT)
+        field = PortField(f)
+        field.set(port_type, num)
+        field.pack(side=tk.LEFT)
+        return field
 
     def add_plan(self, vlan="", virtual_ip="", device1_ip="", device1_role="主", device2_ip="", device2_role="备"):
         self.plan_editor.add({"vlan": vlan, "mask": "255.255.255.0", "virtual_ip": virtual_ip,
@@ -505,7 +457,7 @@ class VrrpPage:
             row["device1_role"] = "primary" if row["device1_role"] == "主" else "secondary"
             row["device2_role"] = "primary" if row["device2_role"] == "主" else "secondary"
         return {"priority": self.priority.get().strip(), "preempt_delay": self.preempt_delay.get().strip(),
-                "track_interface": self.track_interface.get().strip(), "track_reduced": self.track_reduced.get().strip(),
+                "track_interface": self.track_port.get(), "track_reduced": self.track_reduced.get().strip(),
                 "auth": self.auth.get().strip(),
                 "summary_role": "device1" if self.summary_role.get() == "设备 1" else "device2",
                 "plans": plans}, []
@@ -571,21 +523,21 @@ class EthTrunkPage:
         ttk.Entry(f, textvariable=self.trunk_id, width=12).pack(side=tk.LEFT)
         ttk.Label(self.frame, text="允许 VLAN（每行一个）", foreground="gray").pack(anchor=tk.W, pady=(5, 0))
         self.vlan_editor = RowsEditor(self.frame, [("vlan", "VLAN", 12, "vlan")])
-        ttk.Label(self.frame, text="成员接口（每行一个，可选百兆 Ethernet 或千兆 GigabitEthernet）", foreground="gray").pack(anchor=tk.W, pady=(5, 0))
+        ttk.Label(self.frame, text="成员接口（每行一个，GE=千兆 / ETH=百兆，编号可含板卡号如 1/0/22）", foreground="gray").pack(anchor=tk.W, pady=(5, 0))
         self.member_editor = RowsEditor(self.frame, [
-            ("type", "端口类型", 18, ("GE", "ETH")), ("num", "端口号", 12, None),
+            ("port", "成员接口", 12, "port"),
         ])
         self.add_vlan("10")
         self.add_vlan("20")
-        self.add_member("GE", "22")
-        self.add_member("GE", "23")
-        self.add_member("GE", "24")
+        self.add_member("GE", "0/0/22")
+        self.add_member("GE", "0/0/23")
+        self.add_member("GE", "0/0/24")
 
     def add_vlan(self, vlan=""):
         self.vlan_editor.add({"vlan": vlan})
 
     def add_member(self, port_type="GE", num=""):
-        self.member_editor.add({"type": port_type, "num": num})
+        self.member_editor.add({"port": (port_type, num)})
 
     def set_lib_values(self, ip_list, vlan_list):
         self.vlan_editor.set_lib_values(ip_list, vlan_list)
@@ -660,7 +612,7 @@ class AclPage:
         ttk.Label(f, text="ACL 编号").pack(side=tk.LEFT, padx=(12, 2))
         self.acl_number = tk.StringVar(value="3000")
         ttk.Entry(f, textvariable=self.acl_number, width=10).pack(side=tk.LEFT)
-        self.bind_interface = self._field("绑定接口（可空）", "GigabitEthernet0/0/1")
+        self.bind_port = self._port_field("绑定接口（可空）", "GE", "0/0/1")
         self.direction = self._field("过滤方向", "inbound")
         ttk.Label(self.frame, text="普通 ACL 忽略目的地址列；高级 ACL 使用来源与目的地址。", foreground="gray").pack(anchor=tk.W)
         self.editor = RowsEditor(self.frame, [
@@ -680,6 +632,15 @@ class AclPage:
         ttk.Entry(f, textvariable=var, width=28).pack(side=tk.LEFT)
         return var
 
+    def _port_field(self, label, port_type, num):
+        f = ttk.Frame(self.frame)
+        f.pack(fill=tk.X, pady=1)
+        ttk.Label(f, text=label, width=18).pack(side=tk.LEFT)
+        field = PortField(f)
+        field.set(port_type, num)
+        field.pack(side=tk.LEFT)
+        return field
+
     def add_row(self):
         self.editor.add({"action": "permit", "source_wildcard": "0.0.0.255", "destination_wildcard": "0.0.0.255"})
         self._update_type()
@@ -696,7 +657,7 @@ class AclPage:
 
     def collect(self):
         return {"acl_type": self.acl_type.get().strip(), "acl_number": self.acl_number.get().strip(),
-                "bind_interface": self.bind_interface.get().strip(), "direction": self.direction.get().strip(),
+                "bind_interface": self.bind_port.get(), "direction": self.direction.get().strip(),
                 "rules": self.editor.values()}, []
 
     def validate(self, params):

@@ -1,4 +1,9 @@
-"""基础 Eth-Trunk 链路聚合配置生成（对应文档 2.4）。"""
+"""基础 Eth-Trunk 链路聚合配置生成（对应文档 2.4）。
+
+成员接口两种写法二选一：
+  {"port": "GigabitEthernet0/0/22"}   完整接口名（界面 PortField 的输出格式）
+  {"type": "GE", "num": "22"}         缩写+编号（num 纯数字补 0/0/，含 / 原样使用）
+"""
 from .base import port_name, render_vlan_batch
 
 
@@ -7,7 +12,7 @@ def collect_vlans(params):
 
 
 def generate(params):
-    members = [row for row in params.get("members", []) if row.get("num")]
+    members = [row for row in params.get("members", []) if row.get("num") or row.get("port")]
     if not members:
         return ""
     trunk_id = params["trunk_id"]
@@ -18,7 +23,8 @@ def generate(params):
         f" port trunk allow-pass vlan {allow}",
     ]
     for member in members:
-        lines += [f"interface {port_name(member.get('type'), member['num'])}", f" eth-trunk {trunk_id}"]
+        name = member["port"] if member.get("port") else port_name(member.get("type"), member["num"])
+        lines += [f"interface {name}", f" eth-trunk {trunk_id}"]
     return "\n".join(lines)
 
 

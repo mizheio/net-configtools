@@ -1,7 +1,9 @@
 """公共工具：VLAN 汇总、vlan batch 头部生成、接口名拼接"""
 
-# 接口类型缩写 -> 华为完整接口名前缀
+# 接口类型缩写 -> 华为完整接口名前缀。加新类型（如 XGE）只改这一个映射，
+# 所有 PortField 控件与 port_name() 自动带出
 PORT_TYPE_MAP = {"GE": "GigabitEthernet", "ETH": "Ethernet"}
+PORT_TYPES = tuple(PORT_TYPE_MAP)
 
 
 def port_name(type_token, num):

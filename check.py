@@ -197,6 +197,19 @@ interface GigabitEthernet0/0/23
 interface Ethernet0/0/24
  eth-trunk 1""")
 
+# ---- 成员接口用完整接口名（界面 PortField 输出格式）----
+ok &= run("2.4b 成员口完整名", eth_trunk.generate_full({
+    "trunk_id": "1",
+    "vlans": [{"vlan": "10"}],
+    "members": [{"port": "Ethernet0/0/24"}],
+}), """\
+vlan 10
+interface Eth-Trunk1
+ port link-type trunk
+ port trunk allow-pass vlan 10
+interface Ethernet0/0/24
+ eth-trunk 1""")
+
 # ---- 文档 2.5 OSPF ----
 ok &= run("2.5 OSPF", ospf.generate({
     "process_id": "1", "router_id": "10.1.1.1", "area": "0.0.0.0",
