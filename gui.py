@@ -426,53 +426,80 @@ class RowsEditor:
                     row["widgets"][key]["values"] = self.vlan_values
 
 
-# ============================================================ VRRP 页
+# ============================================================ VRRP 双机热备页
 class VrrpPage:
-    def __init__(self, parent):
+    def __init__(self, parent, on_generate):
         self.frame = ttk.Frame(parent, padding=6)
         self.enabled = tk.BooleanVar(value=True)
+        self.on_generate = on_generate
+
         bar = ttk.Frame(self.frame)
         bar.pack(fill=tk.X)
-        ttk.Button(bar, text="添加 VLANIF", command=self.add_row).pack(side=tk.LEFT, padx=2)
+        ttk.Button(bar, text="添加 VLAN", command=self.add_plan).pack(side=tk.LEFT, padx=2)
+        ttk.Button(bar, text="生成设备 1", command=lambda: self.on_generate("device1")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(bar, text="生成设备 2", command=lambda: self.on_generate("device2")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(bar, text="一键生成两台", command=lambda: self.on_generate("pair")).pack(side=tk.LEFT, padx=2)
         ttk.Checkbutton(bar, text="参与汇总", variable=self.enabled).pack(side=tk.RIGHT)
-        self.priority = self._field("主设备优先级", "120", 8)
-        self.preempt_delay = self._field("抢占延时(秒)", "10", 8)
-        self.track_interface = self._field("跟踪接口", "GigabitEthernet0/0/6", 24)
-        self.track_reduced = self._field("跟踪降级值", "50", 8)
-        self.auth = self._field("认证密码", "admin123", 16)
-        ttk.Label(self.frame, text="角色设为主设备时才生成优先级、抢占与接口跟踪。", foreground="gray").pack(anchor=tk.W, pady=(2, 0))
-        self.editor = RowsEditor(self.frame, [
-            ("vlan", "VLAN", 8, "vlan"), ("ip", "本机 IP", 18, "ip"),
-            ("mask", "掩码", 16, None), ("virtual_ip", "虚拟 IP", 18, "ip"),
-            ("role", "角色", 10, ("primary", "secondary")),
-        ])
-        self.add_row()
-        self.add_row()
 
-    def _field(self, label, default, width):
-        f = ttk.Frame(self.frame)
+        common = ttk.Frame(self.frame)
+        common.pack(fill=tk.X, pady=2)
+        ttk.Label(common, text="认证密码", width=12).pack(side=tk.LEFT)
+        self.auth = tk.StringVar(value="admin123")
+        ttk.Entry(common, textvariable=self.auth, width=18).pack(side=tk.LEFT)
+        ttk.Label(common, text="汇总设备", width=10).pack(side=tk.LEFT, padx=(18, 0))
+        self.summary_role = tk.StringVar(value="设备 1")
+        ttk.Combobox(common, textvariable=self.summary_role, values=("设备 1", "设备 2"),
+                     width=12, state="readonly").pack(side=tk.LEFT)
+
+        ttk.Label(self.frame, text="VRRP VLAN 规划（每行分别设置设备 1、设备 2 的 VRRP 主/备角色）", foreground="gray").pack(anchor=tk.W, pady=(4, 0))
+        self.plan_editor = RowsEditor(self.frame, [
+            ("vlan", "VLAN", 8, "vlan"), ("mask", "掩码", 16, None),
+            ("virtual_ip", "虚拟 IP", 16, "ip"), ("device1_ip", "设备 1 IP", 16, "ip"),
+            ("device1_role", "设备 1 角色", 10, ("主", "备")), ("device2_ip", "设备 2 IP", 16, "ip"),
+            ("device2_role", "设备 2 角色", 10, ("主", "备")),
+        ])
+        self.add_plan("10", "192.168.10.254", "192.168.10.252", "主", "192.168.10.253", "备")
+        self.add_plan("20", "192.168.20.254", "192.168.20.252", "备", "192.168.20.253", "主")
+
+        primary = ttk.LabelFrame(self.frame, text=" 所有“主”角色接口的通用参数 ", padding=5)
+        primary.pack(fill=tk.X, pady=(7, 0))
+        self.priority = self._card_field(primary, "优先级", "120")
+        self.preempt_delay = self._card_field(primary, "抢占延时(秒)", "10")
+        self.track_interface = self._card_field(primary, "跟踪接口", "GigabitEthernet0/0/6")
+        self.track_reduced = self._card_field(primary, "跟踪降级值", "50")
+
+    def _card_field(self, parent, label, default):
+        f = ttk.Frame(parent)
         f.pack(fill=tk.X, pady=1)
-        ttk.Label(f, text=label, width=16).pack(side=tk.LEFT)
+        ttk.Label(f, text=label, width=14).pack(side=tk.LEFT)
         var = tk.StringVar(value=default)
-        ttk.Entry(f, textvariable=var, width=width).pack(side=tk.LEFT)
+        ttk.Entry(f, textvariable=var, width=22).pack(side=tk.LEFT)
         return var
 
-    def add_row(self):
-        self.editor.add({"mask": "255.255.255.0", "role": "secondary"})
+    def add_plan(self, vlan="", virtual_ip="", device1_ip="", device1_role="主", device2_ip="", device2_role="备"):
+        self.plan_editor.add({"vlan": vlan, "mask": "255.255.255.0", "virtual_ip": virtual_ip,
+                              "device1_ip": device1_ip, "device1_role": device1_role,
+                              "device2_ip": device2_ip, "device2_role": device2_role})
 
     def set_lib_values(self, ip_list, vlan_list):
-        self.editor.set_lib_values(ip_list, vlan_list)
+        self.plan_editor.set_lib_values(ip_list, vlan_list)
 
     def collect(self):
+        plans = self.plan_editor.values()
+        for row in plans:
+            row["device1_role"] = "primary" if row["device1_role"] == "主" else "secondary"
+            row["device2_role"] = "primary" if row["device2_role"] == "主" else "secondary"
         return {"priority": self.priority.get().strip(), "preempt_delay": self.preempt_delay.get().strip(),
                 "track_interface": self.track_interface.get().strip(), "track_reduced": self.track_reduced.get().strip(),
-                "auth": self.auth.get().strip(), "ifaces": self.editor.values()}, []
+                "auth": self.auth.get().strip(),
+                "summary_role": "device1" if self.summary_role.get() == "设备 1" else "device2",
+                "plans": plans}, []
 
     def validate(self, params):
         return []
 
     def render(self, params):
-        return vrrp.generate_full(params)
+        return vrrp.generate_pair(params)
 
 
 # ============================================================ MSTP 页
@@ -519,24 +546,38 @@ class EthTrunkPage:
         self.enabled = tk.BooleanVar(value=True)
         bar = ttk.Frame(self.frame)
         bar.pack(fill=tk.X)
+        ttk.Button(bar, text="添加 VLAN", command=self.add_vlan).pack(side=tk.LEFT, padx=2)
+        ttk.Button(bar, text="添加成员接口", command=self.add_member).pack(side=tk.LEFT, padx=2)
         ttk.Checkbutton(bar, text="参与汇总", variable=self.enabled).pack(side=tk.RIGHT)
-        self.vars = {}
-        self._field("聚合口编号", "trunk_id", "1")
-        self._field("允许 VLAN（空格分隔）", "allow", "10 20")
-        self._field("成员口（空格分隔）", "members", "22 23 24")
-
-    def _field(self, label, key, default):
         f = ttk.Frame(self.frame)
         f.pack(fill=tk.X, pady=1)
-        ttk.Label(f, text=label, width=20).pack(side=tk.LEFT)
-        self.vars[key] = tk.StringVar(value=default)
-        ttk.Entry(f, textvariable=self.vars[key], width=30).pack(side=tk.LEFT)
+        ttk.Label(f, text="聚合口编号", width=16).pack(side=tk.LEFT)
+        self.trunk_id = tk.StringVar(value="1")
+        ttk.Entry(f, textvariable=self.trunk_id, width=12).pack(side=tk.LEFT)
+        ttk.Label(self.frame, text="允许 VLAN（每行一个）", foreground="gray").pack(anchor=tk.W, pady=(5, 0))
+        self.vlan_editor = RowsEditor(self.frame, [("vlan", "VLAN", 12, "vlan")])
+        ttk.Label(self.frame, text="成员接口（每行一个，可选百兆 Ethernet 或千兆 GigabitEthernet）", foreground="gray").pack(anchor=tk.W, pady=(5, 0))
+        self.member_editor = RowsEditor(self.frame, [
+            ("type", "端口类型", 18, ("GE", "ETH")), ("num", "端口号", 12, None),
+        ])
+        self.add_vlan("10")
+        self.add_vlan("20")
+        self.add_member("GE", "22")
+        self.add_member("GE", "23")
+        self.add_member("GE", "24")
+
+    def add_vlan(self, vlan=""):
+        self.vlan_editor.add({"vlan": vlan})
+
+    def add_member(self, port_type="GE", num=""):
+        self.member_editor.add({"type": port_type, "num": num})
 
     def set_lib_values(self, ip_list, vlan_list):
-        pass
+        self.vlan_editor.set_lib_values(ip_list, vlan_list)
 
     def collect(self):
-        return {key: var.get().strip() for key, var in self.vars.items()}, []
+        return {"trunk_id": self.trunk_id.get().strip(), "vlans": self.vlan_editor.values(),
+                "members": self.member_editor.values()}, []
 
     def validate(self, params):
         return []
@@ -671,7 +712,7 @@ class App:
         self.page_if = IfVlanPage(self.nb)
         self.page_vlanif = VlanifPage(self.nb)
         self.page_dhcp = DhcpPage(self.nb)
-        self.page_vrrp = VrrpPage(self.nb)
+        self.page_vrrp = VrrpPage(self.nb, self.generate_vrrp_device)
         self.page_mstp = MstpPage(self.nb)
         self.page_trunk = EthTrunkPage(self.nb)
         self.page_ospf = OspfPage(self.nb)
@@ -733,6 +774,22 @@ class App:
         self.last_params = params
         self.set_preview(text)
 
+    def generate_vrrp_device(self, target):
+        """VRRP 页专用按钮：生成主、备之一，或在预览中并列显示两份脚本。"""
+        params, errors = self._prepare(self.page_vrrp)
+        if errors:
+            messagebox.showwarning("无法生成", "\n".join(errors))
+            return
+        if target == "pair":
+            text = vrrp.generate_pair(params)
+        else:
+            text = vrrp.generate_device_full(params, target)
+        if not text.strip():
+            messagebox.showinfo("提示", "请至少填写一行 VRRP VLAN 规划")
+            return
+        self.last_params = {"vrrp": params, "target": target}
+        self.set_preview(text)
+
     def generate_all(self):
         blocks, errors, vlans, all_params = [], [], set(), {}
 
@@ -761,9 +818,19 @@ class App:
                 if params.get("if_vlan", "").isdigit():
                     vlans.add(int(params["if_vlan"]))
 
+        # VRRP 是双机配置。汇总时只能选择主或备之一，绝不把两份配置混入同一台设备。
+        if self.page_vrrp.enabled.get():
+            params, errs = self._prepare(self.page_vrrp)
+            errors += errs
+            target = params["summary_role"]
+            block = vrrp.generate_device(params, target)
+            if block:
+                all_params["vrrp"] = {"target": target, **params}
+                blocks.append(block)
+                vlans |= set(vrrp.collect_vlans(params))
+
         # v0.2 三层交换机模块。模块自身只生成正文，汇总时在这里统一生成 vlan batch。
         extra_pages = (
-            ("vrrp", self.page_vrrp, vrrp.generate, vrrp.collect_vlans),
             ("mstp", self.page_mstp, mstp.generate, mstp.collect_vlans),
             ("eth_trunk", self.page_trunk, eth_trunk.generate, eth_trunk.collect_vlans),
             ("ospf", self.page_ospf, ospf.generate, None),

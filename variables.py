@@ -5,8 +5,16 @@
 """
 import json
 import os
+import sys
 
-VAR_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "variables.json")
+# PyInstaller -F 打包后 __file__ 指向临时解压目录，必须改用 exe 所在目录，
+# 否则每次退出变量库都会丢
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+VAR_FILE = os.path.join(BASE_DIR, "variables.json")
 
 
 def load():

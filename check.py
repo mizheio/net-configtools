@@ -101,14 +101,19 @@ interface Vlanif10
 
 # ---- DHCP 中继/主备已按需求删除，v0.1 只保留全局地址池 ----
 
-# ---- 文档 2.2 VRRP：主 10 备 20 ----
-ok &= run("2.2 VRRP", vrrp.generate_full({
+# ---- 文档 2.2 VRRP：主10备20 / 主20备10 双机互备 ----
+vrrp_params = {
     "priority": "120", "preempt_delay": "10", "track_interface": "GigabitEthernet0/0/6",
-    "track_reduced": "50", "auth": "admin123", "ifaces": [
-        {"vlan": "10", "ip": "192.168.10.252", "mask": "255.255.255.0", "virtual_ip": "192.168.10.254", "role": "primary"},
-        {"vlan": "20", "ip": "192.168.20.252", "mask": "255.255.255.0", "virtual_ip": "192.168.20.254", "role": "secondary"},
+    "track_reduced": "50", "auth": "admin123", "plans": [
+        {"vlan": "10", "mask": "255.255.255.0", "virtual_ip": "192.168.10.254",
+         "device1_ip": "192.168.10.252", "device1_role": "primary",
+         "device2_ip": "192.168.10.253", "device2_role": "secondary"},
+        {"vlan": "20", "mask": "255.255.255.0", "virtual_ip": "192.168.20.254",
+         "device1_ip": "192.168.20.252", "device1_role": "secondary",
+         "device2_ip": "192.168.20.253", "device2_role": "primary"},
     ],
-}), """\
+}
+ok &= run("2.2 VRRP设备1(主10备20)", vrrp.generate_device_full(vrrp_params, "device1"), """\
 vlan batch 10 20
 interface Vlanif10
  ip address 192.168.10.252 255.255.255.0
@@ -120,6 +125,20 @@ interface Vlanif10
 interface Vlanif20
  ip address 192.168.20.252 255.255.255.0
  vrrp vrid 20 virtual-ip 192.168.20.254
+ vrrp vrid 20 authentication-mode md5 admin123""")
+
+ok &= run("2.2 VRRP设备2(主20备10)", vrrp.generate_device_full(vrrp_params, "device2"), """\
+vlan batch 10 20
+interface Vlanif10
+ ip address 192.168.10.253 255.255.255.0
+ vrrp vrid 10 virtual-ip 192.168.10.254
+ vrrp vrid 10 authentication-mode md5 admin123
+interface Vlanif20
+ ip address 192.168.20.253 255.255.255.0
+ vrrp vrid 20 virtual-ip 192.168.20.254
+ vrrp vrid 20 priority 120
+ vrrp vrid 20 preempt-mode timer delay 10
+ vrrp vrid 20 track interface GigabitEthernet0/0/6 reduced 50
  vrrp vrid 20 authentication-mode md5 admin123""")
 
 # ---- 文档 2.3 MSTP：主 10 备 20 ----
@@ -140,7 +159,10 @@ stp instance 2 root secondary""")
 
 # ---- 文档 2.4 基础链路聚合 ----
 ok &= run("2.4 链路聚合", eth_trunk.generate_full({
-    "trunk_id": "1", "allow": "10 20", "members": "22 23 24",
+    "trunk_id": "1",
+    "vlans": [{"vlan": "10"}, {"vlan": "20"}],
+    "members": [{"type": "GE", "num": "22"}, {"type": "GE", "num": "23"},
+                {"type": "ETH", "num": "24"}],
 }), """\
 vlan batch 10 20
 interface Eth-Trunk1
@@ -150,7 +172,7 @@ interface GigabitEthernet0/0/22
  eth-trunk 1
 interface GigabitEthernet0/0/23
  eth-trunk 1
-interface GigabitEthernet0/0/24
+interface Ethernet0/0/24
  eth-trunk 1""")
 
 # ---- 文档 2.5 OSPF ----
