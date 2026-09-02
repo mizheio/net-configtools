@@ -1,7 +1,24 @@
+# Python
 __pycache__/
 *.pyc
+
+# 用户数据（IP/VLAN 库，含内网信息，不入库）
 variables.json
+
+# 虚拟环境 / 打包产物
 .venv/
 dist/
 build/
 *.spec
+
+# 导出的配置脚本
+output/
+
+# 内部开发文档，不公开
+v0.3开发文档.md
+
+# IDE / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
