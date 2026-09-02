@@ -19,7 +19,15 @@
 
 ## 运行
 
-需要 Python 3.12+（仅标准库，无需安装任何依赖）：
+需要 Python 3.12+（仅标准库，无需安装任何依赖）。
+
+建议使用 [uv](https://docs.astral.sh/uv/) 运行，它会自动处理 Python 版本和虚拟环境：
+
+```bash
+uv run main.py
+```
+
+也可以直接使用系统 Python：
 
 ```bash
 python main.py
