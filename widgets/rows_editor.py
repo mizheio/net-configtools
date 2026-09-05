@@ -7,6 +7,9 @@
   (a, b)    固定选项只读下拉
   "port"    端口选择（PortField），values() 返回完整接口名
   "check"   勾选框，values() 返回 True/False
+
+groups=[(组标题, 跨列数), ...] 可在列头上方渲染分组标题行（如 本端设备/对端设备），
+跨列数之和须等于列数；不传则与原版布局一致。
 """
 import tkinter as tk
 from tkinter import ttk
@@ -16,17 +19,27 @@ from .port_field import PortField
 
 class RowsEditor:
 
-    def __init__(self, parent, columns):
+    def __init__(self, parent, columns, groups=None):
         self.columns = columns  # (字段名, 标题, 宽度, 类型/可选值)
+        self.groups = groups    # [(组标题, 跨列数), ...]，跨列数之和须等于列数；None = 不分组
         self.rows = []
-        self.next_grid_row = 1
+        # 分组时第 0 行放组标题、第 1 行放列头，数据行从第 2 行起
+        self.next_grid_row = 2 if groups else 1
         self.ip_values, self.vlan_values = [], []
         self.area = ttk.Frame(parent)
         self.area.pack(fill=tk.X, pady=(2, 4))
         # 表头与输入控件共用同一个 grid，避免 Label 和 Combobox 宽度不同造成列错位。
+        header_row = 0
+        if groups:
+            col = 0
+            for title, span in groups:
+                ttk.Label(self.area, text=f"── {title} ──", anchor=tk.CENTER)\
+                    .grid(row=0, column=col, columnspan=span, padx=2, sticky="ew")
+                col += span
+            header_row = 1
         for col, (_, label, _, _) in enumerate(columns):
-            ttk.Label(self.area, text=label, anchor=tk.W).grid(row=0, column=col, padx=2, sticky="ew")
-        ttk.Label(self.area, text="").grid(row=0, column=len(columns), padx=2)
+            ttk.Label(self.area, text=label, anchor=tk.W).grid(row=header_row, column=col, padx=2, sticky="ew")
+        ttk.Label(self.area, text="").grid(row=header_row, column=len(columns), padx=2)
 
     def add(self, defaults=None):
         defaults = defaults or {}
