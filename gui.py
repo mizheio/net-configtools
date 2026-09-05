@@ -24,6 +24,7 @@ from modules.base import render_vlan_batch
 from pages import CATEGORY_PAGES
 from pages.switch import EthTrunkPage, VrrpPage
 from widgets import ScrollFrame
+from version import __version__
 
 
 # ============================================================ IP / VLAN 库面板
@@ -86,7 +87,7 @@ class LibraryPanel:
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("华为 eNSP 配置生成工具 v0.3")
+        root.title(f"华为 eNSP 配置生成工具 v{__version__}")
         root.geometry("1020x720")
 
         paned = ttk.PanedWindow(root, orient=tk.VERTICAL)

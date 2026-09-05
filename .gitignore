@@ -15,7 +15,7 @@ build/
 output/
 
 # 内部开发文档，不公开
-v0.3开发文档.md
+开发文档.md
 
 # IDE / 系统
 .idea/
