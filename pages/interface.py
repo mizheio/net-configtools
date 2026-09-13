@@ -14,10 +14,14 @@ from modules.base import PORT_TYPES, port_name
 
 
 def _normalize_mask(mask):
-    """兼容 /24、24 两种前缀写法，统一转成点分十进制掩码"""
+    """兼容 /24、24 两种前缀写法，统一转成点分十进制掩码；
+    非法值（超范围前缀、点分乱串）原样返回，交由 validate 报错，不在 collect 崩溃"""
     mask = mask.strip().lstrip("/")
     if mask.isdigit():
-        return str(ipaddress.ip_network(f"0.0.0.0/{int(mask)}").netmask)
+        n = int(mask)
+        if 0 <= n <= 32:
+            return str(ipaddress.ip_network(f"0.0.0.0/{n}").netmask)
+        return mask
     return mask
 
 

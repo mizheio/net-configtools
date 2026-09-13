@@ -16,6 +16,7 @@ from .gre import GrePage
 from .bgp import BgpPage
 from .mpls import MplsPage
 from .subnet_calc import SubnetCalcPage
+from .firewall import FirewallIfPage, NatPolicyPage, SecurityPolicyPage
 
 # 类别 -> 页签顺序；交换机和路由器分别使用各自的DHCP页面
 CATEGORY_PAGES = {
@@ -23,4 +24,5 @@ CATEGORY_PAGES = {
               DhcpSwitchPage, OspfPage, AclPage],
     "路由器": [InterfacePage, DhcpRouterPage, OspfPage, AclPage, NatPage, GrePage, BgpPage, MplsPage],
     "扩展工具": [SubnetCalcPage],
+    "防火墙": [FirewallIfPage, NatPolicyPage, SecurityPolicyPage],
 }
