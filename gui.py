@@ -44,11 +44,13 @@ class LibraryPanel:
         self.tree.column("type", width=55, anchor=tk.W)
         self.tree.column("value", width=180, anchor=tk.W)
         self.tree.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        self.tree.bind("<Double-1>", lambda *_: self.edit())
 
         btns = ttk.Frame(self.frame)
         btns.grid(row=1, column=0, sticky="ew", padx=4, pady=2)
         ttk.Button(btns, text="新增IP", width=7, command=lambda: self.add("ip", "IP / 网段")).pack(side=tk.LEFT, padx=2)
         ttk.Button(btns, text="新增VLAN", width=8, command=lambda: self.add("vlan", "VLAN")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btns, text="编辑", width=6, command=self.edit).pack(side=tk.LEFT, padx=2)
         ttk.Button(btns, text="删除", width=6, command=self.delete).pack(side=tk.LEFT, padx=2)
         ttk.Label(self.frame, text="输入框下拉选值后可直接改\n（如选 192.168.10.0 改成 .1）",
                   foreground="gray", justify=tk.LEFT).grid(row=2, column=0, pady=2, sticky=tk.W)
@@ -71,6 +73,29 @@ class LibraryPanel:
             varlib.save(self.lib)
             self.refresh()
             self.on_change()
+
+    def edit(self):
+        """编辑选中条目：弹窗预填旧值，改后替换、保存并同步到各页下拉框"""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        kind, old_value = sel[0].split("|", 1)
+        label = {"ip": "IP / 网段", "vlan": "VLAN"}[kind]
+        new_value = simpledialog.askstring(f"编辑{label}", f"{label}值：",
+                                           parent=self.frame, initialvalue=old_value)
+        if new_value is None:
+            return
+        new_value = new_value.strip()
+        if not new_value or new_value == old_value:
+            return
+        if new_value in self.lib[kind]:
+            messagebox.showwarning("已存在", f"{label}库中已有该值：{new_value}")
+            return
+        self.lib[kind][self.lib[kind].index(old_value)] = new_value
+        varlib.save(self.lib)
+        self.refresh()
+        self.tree.selection_set(f"{kind}|{new_value}")
+        self.on_change()
 
     def delete(self):
         sel = self.tree.selection()
