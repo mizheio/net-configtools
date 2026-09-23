@@ -15,14 +15,20 @@ from .nat import NatPage
 from .gre import GrePage
 from .bgp import BgpPage
 from .mpls import MplsPage
+from .rt_ipsec import RouterIpsecPage
 from .subnet_calc import SubnetCalcPage
 from .firewall import FirewallIfPage, IpsecPage, NatPolicyPage, SecurityPolicyPage
+from .fw_gre import FwGrePage
+from .fw_gre_over_ipsec import FwGreOverIpsecPage
+from .fw_ipsec_over_gre import FwIpsecOverGrePage
 
 # 类别 -> 页签顺序；交换机和路由器分别使用各自的DHCP页面
 CATEGORY_PAGES = {
     "交换机": [IfVlanPage, VlanifPage, VrrpPage, MstpPage, EthTrunkPage,
               DhcpSwitchPage, OspfPage, AclPage],
-    "路由器": [InterfacePage, DhcpRouterPage, OspfPage, AclPage, NatPage, GrePage, BgpPage, MplsPage],
+    "路由器": [InterfacePage, DhcpRouterPage, OspfPage, AclPage, NatPage, GrePage, BgpPage,
+              MplsPage, RouterIpsecPage],
     "扩展工具": [SubnetCalcPage],
-    "防火墙": [FirewallIfPage, NatPolicyPage, SecurityPolicyPage, IpsecPage],
+    "防火墙": [FirewallIfPage, NatPolicyPage, SecurityPolicyPage, IpsecPage,
+              FwGrePage, FwIpsecOverGrePage, FwGreOverIpsecPage],
 }

@@ -271,6 +271,8 @@ class App:
                 continue
             params, errs = self._prepare(page)
             errors += errs
+            if errs:
+                continue  # 本页有错就不 render_summary（生成函数不做容错，避免直接抛异常）
             if getattr(page, "is_empty", None) and page.is_empty(params):
                 continue
             block = page.render_summary(params)
